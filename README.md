@@ -102,7 +102,7 @@ See [`docs/architecture.md`](docs/architecture.md) for the full picture, [`docs/
 
 ## Quick start
 
-Requires Go 1.24+ and Node 20+.
+Requires Go 1.25+ and Node 20+.
 
 ```bash
 # 3-node Raft cluster + gateway + event ingestion

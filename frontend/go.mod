@@ -4,4 +4,4 @@
 // frontend/ has no actual Go code — it's a Next.js app.
 module boilerpulse/frontend-placeholder
 
-go 1.24
+go 1.25
