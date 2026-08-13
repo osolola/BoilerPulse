@@ -1,0 +1,1 @@
+# Keeps this empty directory tracked by git -- deploy/docker/frontend.Dockerfile's Docker build copies it, and Docker's COPY fails on a source path that doesn't exist at all (empty dirs aren't tracked by git, so without this file, a fresh clone has no public/ directory whatsoever).
