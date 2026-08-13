@@ -1,0 +1,11 @@
+node_id: node-1
+http_addr: ":8080"
+raft_addr: ":9080"
+admin_addr: ":7080"
+log_level: info
+data_dir: /app/data
+peers:
+  - id: node-2
+    raft_addr: "kv-node-2:9080"
+  - id: node-3
+    raft_addr: "kv-node-3:9080"

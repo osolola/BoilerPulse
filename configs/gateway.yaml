@@ -1,0 +1,14 @@
+http_addr: ":8090"
+log_level: info
+rate_limit_rps: 50
+rate_limit_burst: 100
+nodes:
+  - id: node-1
+    http_addr: "http://localhost:8080"
+    admin_addr: "http://localhost:7080"
+  - id: node-2
+    http_addr: "http://localhost:8081"
+    admin_addr: "http://localhost:7081"
+  - id: node-3
+    http_addr: "http://localhost:8082"
+    admin_addr: "http://localhost:7082"

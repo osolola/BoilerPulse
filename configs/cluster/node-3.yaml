@@ -1,0 +1,11 @@
+node_id: node-3
+http_addr: ":8082"
+raft_addr: ":9082"
+admin_addr: ":7082"
+log_level: info
+data_dir: ./data/cluster/node-3
+peers:
+  - id: node-1
+    raft_addr: "localhost:9080"
+  - id: node-2
+    raft_addr: "localhost:9081"

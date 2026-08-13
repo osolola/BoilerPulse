@@ -1,0 +1,106 @@
+# Real 3-node Raft cluster + gateway + frontend. Write/read through the
+# gateway (:8090) -- it routes writes to the current leader and distributes
+# reads. Docker itself is not installed in this dev environment, so this has
+# been authored but not run end-to-end yet — the same topology has been
+# manually verified via `make cluster` (real OS processes, not containers)
+# and via the automated tests/integration cluster tests.
+# BOILERPULSE_ADMIN_TOKEN gates chaos/failure-injection (spec §23/§34):
+# unset by default, meaning every node's admin server and the gateway's
+# /v1/admin/* proxy routes respond 503 (disabled) until you set it, e.g.
+# `BOILERPULSE_ADMIN_TOKEN=dev-chaos-token docker compose up`. See
+# docs/failure-testing.md.
+#
+# BOILERPULSE_CORS_ORIGIN restricts Access-Control-Allow-Origin; unset (the
+# default) means "*", which is fine for this Compose file's all-localhost
+# topology but must be set to the real frontend origin before deploying
+# anywhere those origins would actually differ. See docs/deployment.md.
+x-kv-node: &kv-node
+  build:
+    context: .
+    dockerfile: deploy/docker/node.Dockerfile
+  environment:
+    BOILERPULSE_LOG_LEVEL: info
+    BOILERPULSE_ADMIN_TOKEN: ${BOILERPULSE_ADMIN_TOKEN:-}
+    BOILERPULSE_CORS_ORIGIN: ${BOILERPULSE_CORS_ORIGIN:-}
+
+services:
+  kv-node-1:
+    <<: *kv-node
+    environment:
+      BOILERPULSE_CONFIG: configs/docker/node-1.yaml
+      BOILERPULSE_LOG_LEVEL: info
+      BOILERPULSE_ADMIN_TOKEN: ${BOILERPULSE_ADMIN_TOKEN:-}
+      BOILERPULSE_CORS_ORIGIN: ${BOILERPULSE_CORS_ORIGIN:-}
+    ports:
+      - "8080:8080"
+      - "7080:7080"
+    volumes:
+      - kv-node-1-data:/app/data
+
+  kv-node-2:
+    <<: *kv-node
+    environment:
+      BOILERPULSE_CONFIG: configs/docker/node-2.yaml
+      BOILERPULSE_LOG_LEVEL: info
+      BOILERPULSE_ADMIN_TOKEN: ${BOILERPULSE_ADMIN_TOKEN:-}
+      BOILERPULSE_CORS_ORIGIN: ${BOILERPULSE_CORS_ORIGIN:-}
+    ports:
+      - "8081:8080"
+      - "7081:7080"
+    volumes:
+      - kv-node-2-data:/app/data
+
+  kv-node-3:
+    <<: *kv-node
+    environment:
+      BOILERPULSE_CONFIG: configs/docker/node-3.yaml
+      BOILERPULSE_LOG_LEVEL: info
+      BOILERPULSE_ADMIN_TOKEN: ${BOILERPULSE_ADMIN_TOKEN:-}
+      BOILERPULSE_CORS_ORIGIN: ${BOILERPULSE_CORS_ORIGIN:-}
+    ports:
+      - "8082:8080"
+      - "7082:7080"
+    volumes:
+      - kv-node-3-data:/app/data
+
+  gateway:
+    build:
+      context: .
+      dockerfile: deploy/docker/gateway.Dockerfile
+    environment:
+      BOILERPULSE_GATEWAY_CONFIG: configs/docker/gateway.yaml
+      BOILERPULSE_ADMIN_TOKEN: ${BOILERPULSE_ADMIN_TOKEN:-}
+      BOILERPULSE_CORS_ORIGIN: ${BOILERPULSE_CORS_ORIGIN:-}
+    ports:
+      - "8090:8090"
+    depends_on:
+      - kv-node-1
+      - kv-node-2
+      - kv-node-3
+
+  ingest:
+    build:
+      context: .
+      dockerfile: deploy/docker/ingest.Dockerfile
+    environment:
+      BOILERPULSE_INGEST_TARGET_URL: "http://gateway:8090"
+      BOILERPULSE_INGEST_INTERVAL_SECONDS: "10"
+      BOILERPULSE_LOG_LEVEL: info
+    depends_on:
+      - gateway
+
+  frontend:
+    build:
+      context: .
+      dockerfile: deploy/docker/frontend.Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: "http://localhost:8090"
+    depends_on:
+      - gateway
+
+volumes:
+  kv-node-1-data:
+  kv-node-2-data:
+  kv-node-3-data:

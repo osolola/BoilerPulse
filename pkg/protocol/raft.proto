@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package raft;
+
+option go_package = "boilerpulse/pkg/protocol/raftpb";
+
+// RaftService is the internal node-to-node RPC surface: RequestVote for
+// leader election and AppendEntries for both heartbeats and log
+// replication. This is deliberately separate from the client-facing KV API
+// (internal/api), which stays plain HTTP/JSON — the two have different
+// audiences and don't need to share a wire format.
+service RaftService {
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+}
+
+message LogEntry {
+  uint64 term = 1;
+  uint64 index = 2;
+  bytes command = 3;
+}
+
+message RequestVoteRequest {
+  uint64 term = 1;
+  string candidate_id = 2;
+  uint64 last_log_index = 3;
+  uint64 last_log_term = 4;
+}
+
+message RequestVoteResponse {
+  uint64 term = 1;
+  bool vote_granted = 2;
+}
+
+message AppendEntriesRequest {
+  uint64 term = 1;
+  string leader_id = 2;
+  uint64 prev_log_index = 3;
+  uint64 prev_log_term = 4;
+  repeated LogEntry entries = 5;
+  uint64 leader_commit = 6;
+}
+
+message AppendEntriesResponse {
+  uint64 term = 1;
+  bool success = 2;
+  uint64 conflict_index = 3;
+}

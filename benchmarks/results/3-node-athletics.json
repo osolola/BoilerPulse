@@ -1,0 +1,19 @@
+{
+  "scenario": "athletics",
+  "topology": "3-node",
+  "started_at": "2026-08-12T14:50:57.978816Z",
+  "duration_ms": 35002,
+  "total_requests": 4197,
+  "error_count": 1,
+  "error_rate": 0.0002382654276864427,
+  "achieved_rps": 119.90729169325739,
+  "latency_p50_ms": 1.305,
+  "latency_p95_ms": 17.069,
+  "latency_p99_ms": 36.048,
+  "latency_max_ms": 774.641,
+  "status_counts": {
+    "200": 3760,
+    "204": 436,
+    "error": 1
+  }
+}

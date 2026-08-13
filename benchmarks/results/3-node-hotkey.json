@@ -1,0 +1,18 @@
+{
+  "scenario": "hotkey",
+  "topology": "3-node",
+  "started_at": "2026-08-12T14:52:20.499269Z",
+  "duration_ms": 20000,
+  "total_requests": 413,
+  "error_count": 0,
+  "error_rate": 0,
+  "achieved_rps": 20.64971512066014,
+  "latency_p50_ms": 1.071,
+  "latency_p95_ms": 15.979,
+  "latency_p99_ms": 18.527,
+  "latency_max_ms": 28.847,
+  "status_counts": {
+    "200": 393,
+    "204": 20
+  }
+}

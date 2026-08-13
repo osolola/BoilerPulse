@@ -1,0 +1,18 @@
+{
+  "scenario": "finals",
+  "topology": "single-node",
+  "started_at": "2026-08-12T14:27:25.979764Z",
+  "duration_ms": 30000,
+  "total_requests": 1549,
+  "error_count": 0,
+  "error_rate": 0,
+  "achieved_rps": 51.63180861848786,
+  "latency_p50_ms": 1.076,
+  "latency_p95_ms": 6.093,
+  "latency_p99_ms": 6.8,
+  "latency_max_ms": 40.633,
+  "status_counts": {
+    "200": 1324,
+    "204": 225
+  }
+}

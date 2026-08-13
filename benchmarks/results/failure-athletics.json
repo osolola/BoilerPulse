@@ -1,0 +1,22 @@
+{
+  "scenario": "athletics",
+  "topology": "3-node-failure",
+  "started_at": "2026-08-12T15:06:40.935617Z",
+  "duration_ms": 35002,
+  "total_requests": 4118,
+  "error_count": 8,
+  "error_rate": 0.001942690626517727,
+  "achieved_rps": 117.64982755893644,
+  "latency_p50_ms": 1.157,
+  "latency_p95_ms": 19.234,
+  "latency_p99_ms": 483.643,
+  "latency_max_ms": 848.936,
+  "status_counts": {
+    "200": 3702,
+    "204": 408,
+    "error": 8
+  },
+  "notes": [
+    "failure injected at 15s: killed leader node-2"
+  ]
+}

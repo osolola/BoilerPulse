@@ -1,0 +1,19 @@
+{
+  "scenario": "emergency",
+  "topology": "3-node",
+  "started_at": "2026-08-12T14:51:45.909104Z",
+  "duration_ms": 24748,
+  "total_requests": 3593,
+  "error_count": 1370,
+  "error_rate": 0.38129696632340665,
+  "achieved_rps": 145.17883533400718,
+  "latency_p50_ms": 1.492,
+  "latency_p95_ms": 14.556,
+  "latency_p99_ms": 540.914,
+  "latency_max_ms": 1554.439,
+  "status_counts": {
+    "200": 2123,
+    "204": 100,
+    "error": 1370
+  }
+}

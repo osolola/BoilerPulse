@@ -1,0 +1,21 @@
+# Used only by cmd/simulator benchmark runs (see benchmarks/, docs/benchmarking.md).
+# The default gateway config's rate limit (50 rps/100 burst, configs/gateway.yaml)
+# is per client IP -- correct for production, where real traffic comes from many
+# distinct clients, but the load generator issues every request from one IP, so the
+# default limit measures the rate limiter instead of the cluster's real capacity.
+# This config raises the limit well above any benchmark scenario's peak RPS so the
+# measurement reflects storage/Raft throughput instead.
+http_addr: ":8091"
+log_level: info
+rate_limit_rps: 5000
+rate_limit_burst: 10000
+nodes:
+  - id: node-1
+    http_addr: "http://localhost:8080"
+    admin_addr: "http://localhost:7080"
+  - id: node-2
+    http_addr: "http://localhost:8081"
+    admin_addr: "http://localhost:7081"
+  - id: node-3
+    http_addr: "http://localhost:8082"
+    admin_addr: "http://localhost:7082"

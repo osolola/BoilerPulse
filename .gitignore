@@ -1,0 +1,36 @@
+# Go
+/bin/
+*.test
+*.out
+vendor/
+
+# Env
+.env
+.env.local
+
+# Data / storage engine artifacts
+/data/
+*.wal
+*.sst
+/.cluster/
+
+# Node / frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env*.local
+!frontend/.env.example
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Benchmark output (checked-in results go in benchmarks/results with real data only)
+benchmarks/results/*.tmp
+
+# Editor swap files
+*.swp
+*.swo
