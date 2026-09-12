@@ -121,6 +121,31 @@ func (t *Transport) SendAppendEntries(ctx context.Context, peer string, args *ra
 	}, nil
 }
 
+// SendInstallSnapshot sends peer the whole snapshot in one RPC (see
+// docs/raft.md for why this isn't chunked).
+func (t *Transport) SendInstallSnapshot(ctx context.Context, peer string, args *raft.InstallSnapshotArgs) (*raft.InstallSnapshotReply, error) {
+	if t.faults != nil && !t.faults.apply() {
+		return nil, ErrFaultInjected
+	}
+
+	client, err := t.clientFor(peer)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := client.InstallSnapshot(ctx, &raftpb.InstallSnapshotRequest{
+		Term:              args.Term,
+		LeaderId:          args.LeaderID,
+		LastIncludedIndex: args.LastIncludedIndex,
+		LastIncludedTerm:  args.LastIncludedTerm,
+		Data:              args.Data,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &raft.InstallSnapshotReply{Term: resp.Term}, nil
+}
+
 // Close closes every dialed connection.
 func (t *Transport) Close() error {
 	t.mu.Lock()

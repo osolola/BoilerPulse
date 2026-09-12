@@ -12,6 +12,12 @@ option go_package = "boilerpulse/pkg/protocol/raftpb";
 service RaftService {
   rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+  // InstallSnapshot is sent instead of AppendEntries when a follower's
+  // nextIndex has fallen behind the leader's own compacted log prefix --
+  // the entries it needs no longer exist on the leader, only in the
+  // snapshot. Sent whole in one RPC, not chunked -- a documented
+  // simplification appropriate at this project's scale (see docs/raft.md).
+  rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);
 }
 
 message LogEntry {
@@ -45,4 +51,16 @@ message AppendEntriesResponse {
   uint64 term = 1;
   bool success = 2;
   uint64 conflict_index = 3;
+}
+
+message InstallSnapshotRequest {
+  uint64 term = 1;
+  string leader_id = 2;
+  uint64 last_included_index = 3;
+  uint64 last_included_term = 4;
+  bytes data = 5;
+}
+
+message InstallSnapshotResponse {
+  uint64 term = 1;
 }

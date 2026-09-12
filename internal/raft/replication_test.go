@@ -28,6 +28,10 @@ func (t *countingBlockingTransport) SendAppendEntries(ctx context.Context, peer 
 	return &AppendEntriesReply{Term: args.Term, Success: true}, nil
 }
 
+func (t *countingBlockingTransport) SendInstallSnapshot(ctx context.Context, peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error) {
+	return &InstallSnapshotReply{Term: args.Term}, nil
+}
+
 // TestConcurrentProposalsCoalesceReplicationPerPeer is a regression test
 // for a real instability found via cmd/simulator load testing (see
 // docs/benchmarking.md): a burst of concurrent Propose calls used to spawn

@@ -220,3 +220,227 @@ func assertLogEntriesEqual(t *testing.T, got, want []LogEntry) {
 		}
 	}
 }
+
+func TestFileStorageSnapshotRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	fs, err := OpenFileStorage(dir)
+	if err != nil {
+		t.Fatalf("OpenFileStorage: %v", err)
+	}
+	defer fs.Close()
+
+	if _, _, _, ok, err := fs.LoadSnapshot(); err != nil {
+		t.Fatalf("LoadSnapshot on fresh storage: %v", err)
+	} else if ok {
+		t.Fatal("LoadSnapshot on fresh storage: ok = true, want false")
+	}
+
+	if err := fs.SaveSnapshot(5, 2, []byte("snapshot-payload")); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+
+	index, term, data, ok, err := fs.LoadSnapshot()
+	if err != nil {
+		t.Fatalf("LoadSnapshot: %v", err)
+	}
+	if !ok || index != 5 || term != 2 || string(data) != "snapshot-payload" {
+		t.Errorf("LoadSnapshot() = (%d, %d, %q, %v), want (5, 2, %q, true)", index, term, data, ok, "snapshot-payload")
+	}
+}
+
+func TestFileStorageSnapshotSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	fs, err := OpenFileStorage(dir)
+	if err != nil {
+		t.Fatalf("OpenFileStorage: %v", err)
+	}
+	if err := fs.SaveSnapshot(10, 3, []byte("state")); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	if err := fs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened, err := OpenFileStorage(dir)
+	if err != nil {
+		t.Fatalf("OpenFileStorage (reopen): %v", err)
+	}
+	defer reopened.Close()
+
+	index, term, data, ok, err := reopened.LoadSnapshot()
+	if err != nil {
+		t.Fatalf("LoadSnapshot: %v", err)
+	}
+	if !ok || index != 10 || term != 3 || string(data) != "state" {
+		t.Errorf("LoadSnapshot() after restart = (%d, %d, %q, %v), want (10, 3, %q, true)", index, term, data, ok, "state")
+	}
+}
+
+func TestFileStorageDiscardLogThroughRemovesPrefix(t *testing.T) {
+	dir := t.TempDir()
+	fs, err := OpenFileStorage(dir)
+	if err != nil {
+		t.Fatalf("OpenFileStorage: %v", err)
+	}
+	defer fs.Close()
+
+	if err := fs.AppendEntries([]LogEntry{
+		{Term: 1, Index: 1, Command: []byte("a")},
+		{Term: 1, Index: 2, Command: []byte("b")},
+		{Term: 2, Index: 3, Command: []byte("c")},
+		{Term: 2, Index: 4, Command: []byte("d")},
+	}); err != nil {
+		t.Fatalf("AppendEntries: %v", err)
+	}
+
+	if err := fs.DiscardLogThrough(2); err != nil {
+		t.Fatalf("DiscardLogThrough: %v", err)
+	}
+
+	got, err := fs.LoadLog()
+	if err != nil {
+		t.Fatalf("LoadLog: %v", err)
+	}
+	want := []LogEntry{
+		{Term: 2, Index: 3, Command: []byte("c")},
+		{Term: 2, Index: 4, Command: []byte("d")},
+	}
+	assertLogEntriesEqual(t, got, want)
+
+	// Appending and truncating after a prefix discard must still use the
+	// right positions (baseIndex bookkeeping), not the pre-discard ones.
+	if err := fs.AppendEntries([]LogEntry{{Term: 2, Index: 5, Command: []byte("e")}}); err != nil {
+		t.Fatalf("AppendEntries after discard: %v", err)
+	}
+	if err := fs.TruncateFrom(4); err != nil {
+		t.Fatalf("TruncateFrom after discard: %v", err)
+	}
+	got, err = fs.LoadLog()
+	if err != nil {
+		t.Fatalf("LoadLog: %v", err)
+	}
+	want = []LogEntry{{Term: 2, Index: 3, Command: []byte("c")}}
+	assertLogEntriesEqual(t, got, want)
+}
+
+func TestFileStorageDiscardLogThroughSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	fs, err := OpenFileStorage(dir)
+	if err != nil {
+		t.Fatalf("OpenFileStorage: %v", err)
+	}
+	if err := fs.AppendEntries([]LogEntry{
+		{Term: 1, Index: 1, Command: []byte("a")},
+		{Term: 1, Index: 2, Command: []byte("b")},
+		{Term: 1, Index: 3, Command: []byte("c")},
+	}); err != nil {
+		t.Fatalf("AppendEntries: %v", err)
+	}
+	if err := fs.SaveSnapshot(2, 1, []byte("snap")); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	if err := fs.DiscardLogThrough(2); err != nil {
+		t.Fatalf("DiscardLogThrough: %v", err)
+	}
+	if err := fs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// A fresh OpenFileStorage must reconstruct baseIndex from the snapshot
+	// on disk -- LoadLog should return only what's actually left on disk
+	// (the post-compaction tail), and appending afterward must still land
+	// at the right file offsets.
+	reopened, err := OpenFileStorage(dir)
+	if err != nil {
+		t.Fatalf("OpenFileStorage (reopen): %v", err)
+	}
+	defer reopened.Close()
+
+	got, err := reopened.LoadLog()
+	if err != nil {
+		t.Fatalf("LoadLog: %v", err)
+	}
+	assertLogEntriesEqual(t, got, []LogEntry{{Term: 1, Index: 3, Command: []byte("c")}})
+
+	if err := reopened.AppendEntries([]LogEntry{{Term: 1, Index: 4, Command: []byte("d")}}); err != nil {
+		t.Fatalf("AppendEntries after reopen: %v", err)
+	}
+	got, err = reopened.LoadLog()
+	if err != nil {
+		t.Fatalf("LoadLog: %v", err)
+	}
+	assertLogEntriesEqual(t, got, []LogEntry{
+		{Term: 1, Index: 3, Command: []byte("c")},
+		{Term: 1, Index: 4, Command: []byte("d")},
+	})
+}
+
+func TestFileStorageDiscardLogThroughEverything(t *testing.T) {
+	// A follower installing a snapshot that covers its entire local log
+	// (or more) must end up with an empty log, not an error or a panic.
+	dir := t.TempDir()
+	fs, err := OpenFileStorage(dir)
+	if err != nil {
+		t.Fatalf("OpenFileStorage: %v", err)
+	}
+	defer fs.Close()
+
+	if err := fs.AppendEntries([]LogEntry{
+		{Term: 1, Index: 1, Command: []byte("a")},
+		{Term: 1, Index: 2, Command: []byte("b")},
+	}); err != nil {
+		t.Fatalf("AppendEntries: %v", err)
+	}
+	if err := fs.DiscardLogThrough(100); err != nil {
+		t.Fatalf("DiscardLogThrough(100) on a 2-entry log: %v", err)
+	}
+	got, err := fs.LoadLog()
+	if err != nil {
+		t.Fatalf("LoadLog: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("LoadLog() after discarding past the end = %+v, want empty", got)
+	}
+
+	if err := fs.AppendEntries([]LogEntry{{Term: 2, Index: 101, Command: []byte("fresh")}}); err != nil {
+		t.Fatalf("AppendEntries after full discard: %v", err)
+	}
+	got, err = fs.LoadLog()
+	if err != nil {
+		t.Fatalf("LoadLog: %v", err)
+	}
+	assertLogEntriesEqual(t, got, []LogEntry{{Term: 2, Index: 101, Command: []byte("fresh")}})
+}
+
+func TestOpenFileStorageCleansUpOrphanedTempFiles(t *testing.T) {
+	// Simulates a crash between writing a .tmp file and renaming it into
+	// place (DiscardLogThrough / SaveSnapshot / SaveTermAndVote all use
+	// this protocol) -- the real file is untouched by construction, so the
+	// only thing to clean up is the leftover .tmp litter.
+	dir := t.TempDir()
+	fs, err := OpenFileStorage(dir)
+	if err != nil {
+		t.Fatalf("OpenFileStorage: %v", err)
+	}
+	if err := fs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	for _, name := range []string{"raft-log.bin.tmp", "raft-snapshot.bin.tmp", "raft-state.json.tmp"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("garbage"), 0o644); err != nil {
+			t.Fatalf("writing orphaned %s: %v", name, err)
+		}
+	}
+
+	reopened, err := OpenFileStorage(dir)
+	if err != nil {
+		t.Fatalf("OpenFileStorage with orphaned temp files present: %v", err)
+	}
+	defer reopened.Close()
+
+	for _, name := range []string{"raft-log.bin.tmp", "raft-snapshot.bin.tmp", "raft-state.json.tmp"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s still exists after OpenFileStorage, want it cleaned up", name)
+		}
+	}
+}

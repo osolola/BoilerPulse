@@ -54,7 +54,7 @@ implemented and tested — nothing here is marked done on the basis of intent.
 - `cmd/node`: runs a Raft node alongside the KV API when `peers` is configured; behaves exactly like the Milestone 2 single-node binary when it isn't.
 - `make cluster` / `make stop`: run/stop a real local 3-node cluster (`configs/cluster/*.yaml`).
 - Tests: 9 algorithm tests (election, failover, replication, partition recovery, log-conflict resolution, an explicit election-safety check, persistence-across-restart) against a fake network; file-storage persistence + crash-recovery tests; a real-gRPC-over-localhost test; two full 3-node cluster integration tests (election + replicated write, and failover-then-continues-accepting-writes). All clean under `-race`. The same failover scenario was also verified manually against the compiled binary.
-- `docs/raft.md` documents the algorithm decisions actually implemented (election safety, the §5.4.2 commit rule, conflict resolution, overwritten-proposal detection) and what's still simplified (no snapshotting, static membership, no gateway-level write forwarding yet).
+- `docs/raft.md` documents the algorithm decisions actually implemented (election safety, the §5.4.2 commit rule, conflict resolution, overwritten-proposal detection) and what's still simplified (static membership, no gateway-level write forwarding yet). Log compaction via snapshotting was later added post-Milestone-11 (see "Day 2" below) — at the time Milestone 3 shipped, the log did grow unboundedly, which is exactly the limitation Day 2 closes.
 
 ## What "Milestone 4 complete" means concretely
 
@@ -245,6 +245,61 @@ implemented and tested — nothing here is marked done on the basis of intent.
 
 Ongoing hardening beyond the original 11-milestone spec, each closing a gap
 the project's own docs already flagged. One self-contained change at a time.
+
+### Day 2 — Raft log snapshotting + log compaction (`internal/raft`)
+
+Closes a real limitation that actually caused a production-shaped bug: with
+no snapshotting, `raft-log.bin` grew forever, and after days of manual
+chaos/benchmark testing it reached ~10MB and started stalling writes (the
+same session that produced `docs/benchmarking.md`'s WAL-fsync findings).
+
+- `raft.Storage` gained `SaveSnapshot`/`LoadSnapshot`/`DiscardLogThrough`;
+  `raft.StateMachine` gained `Snapshot`/`Restore`, implemented on
+  `storage.RaftStateMachine` by serializing the whole KV dataset via the
+  existing `Scan("")`. `raft.Transport` gained `SendInstallSnapshot`, backed
+  by a new `InstallSnapshot` RPC (`pkg/protocol/raft.proto`, regenerated).
+- `Node.log` is no longer assumed dense from index 1 -- every helper in
+  `log.go` (`lastLogIndexLocked`, `termAtLocked`, `truncateLogFromLocked`,
+  and a new `discardLogPrefixLocked`) is now offset-aware via
+  `logBaseIndex`/`logBaseTerm`, the boundary of the most recent snapshot.
+  `FileStorage` mirrors the same offset-aware indexing on disk, and
+  compacts its log file with the same write-temp/fsync/rename/fsync-dir
+  protocol used elsewhere in this project (`internal/storage/lsm`'s SSTable
+  flush, `SaveTermAndVote`) -- plus cleanup of any orphaned `.tmp` file left
+  by a crash mid-rewrite, mirroring `internal/storage/lsm`'s identical
+  cleanup on open.
+- A leader whose compacted log no longer contains what a lagging follower's
+  `nextIndex` needs sends the follower its whole snapshot in one
+  `InstallSnapshot` RPC (not chunked) instead of AppendEntries.
+  `Options.SnapshotThreshold` (default 1000 applied entries) controls how
+  often this runs; 0 disables it entirely, which is what every pre-existing
+  algorithm test still uses so their behavior is provably unchanged.
+- Tests: 6 new `FileStorage` tests (snapshot round-trip/restart survival,
+  prefix-discard correctness including a full-log-discard edge case,
+  orphaned-temp-file cleanup), 3 new `RaftStateMachine` tests (snapshot/
+  restore round trip, deterministic encoding, TTL-expiry-during-restore),
+  4 new algorithm-level tests including
+  `TestDisconnectedFollowerCatchesUpViaInstallSnapshot` (a follower
+  disconnected before any writes, reconnected only after the leader has
+  compacted past its `nextIndex`, proven to catch up specifically via
+  InstallSnapshot -- not incidentally via some other path -- by asserting
+  it actually persisted a snapshot of its own), and 1 new real-gRPC test
+  proving `InstallSnapshot` round-trips correctly through actual protobuf
+  encoding, which the fake in-memory network the algorithm tests use never
+  touches. All 243 tests across the repo pass under `-race`.
+- Manually verified against a real 3-node cluster: 1,100 real writes
+  through the gateway reliably tripped all three nodes' 1000-entry
+  threshold independently (confirmed via `"compacted raft log via
+  snapshot"` log lines and a new `raft-snapshot.bin` appearing), each
+  node's `raft-log.bin` shrank back down to just its post-snapshot tail,
+  and killing and restarting a node afterward correctly served both a
+  pre-snapshot key (from the restored snapshot) and a post-snapshot key
+  (from replaying the small remaining log) -- no data loss, no full-history
+  replay on restart.
+- `docs/raft.md` updated: snapshotting moved from "simplified" to "real,"
+  with its own two documented simplifications (snapshots aren't chunked;
+  InstallSnapshot always discards the whole local log rather than
+  preserving a matching suffix).
 
 ### Day 1 — Prometheus metrics (`internal/metrics`)
 

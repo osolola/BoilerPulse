@@ -66,3 +66,18 @@ func (s *Server) AppendEntries(ctx context.Context, req *raftpb.AppendEntriesReq
 		ConflictIndex: reply.ConflictIndex,
 	}, nil
 }
+
+func (s *Server) InstallSnapshot(ctx context.Context, req *raftpb.InstallSnapshotRequest) (*raftpb.InstallSnapshotResponse, error) {
+	if s.faults != nil && !s.faults.apply() {
+		return nil, status.Error(codes.Unavailable, "rpc: request dropped by injected fault")
+	}
+
+	reply := s.node.HandleInstallSnapshot(&raft.InstallSnapshotArgs{
+		Term:              req.Term,
+		LeaderID:          req.LeaderId,
+		LastIncludedIndex: req.LastIncludedIndex,
+		LastIncludedTerm:  req.LastIncludedTerm,
+		Data:              req.Data,
+	})
+	return &raftpb.InstallSnapshotResponse{Term: reply.Term}, nil
+}

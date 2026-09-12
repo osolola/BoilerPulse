@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -90,13 +91,29 @@ func (t *fakeTransport) SendAppendEntries(ctx context.Context, peer string, args
 	return target.HandleAppendEntries(args), nil
 }
 
+func (t *fakeTransport) SendInstallSnapshot(ctx context.Context, peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error) {
+	target, ok := t.net.lookup(t.selfID, peer)
+	if !ok {
+		return nil, errors.New("fake network: unreachable")
+	}
+	return target.HandleInstallSnapshot(args), nil
+}
+
 // memStorage is a fast, non-durable Storage used only for algorithm tests.
 // filestorage_test.go separately tests the real durable implementation.
+// Positions in log are relative to baseIndex, exactly like the real
+// FileStorage: log[i].Index == baseIndex+i+1.
 type memStorage struct {
-	mu       sync.Mutex
-	term     uint64
-	votedFor string
-	log      []LogEntry
+	mu        sync.Mutex
+	term      uint64
+	votedFor  string
+	log       []LogEntry
+	baseIndex uint64
+
+	hasSnapshot   bool
+	snapshotIndex uint64
+	snapshotTerm  uint64
+	snapshotData  []byte
 }
 
 func newMemStorage() *memStorage { return &memStorage{} }
@@ -121,16 +138,27 @@ func (s *memStorage) AppendEntries(entries []LogEntry) error {
 	return nil
 }
 
+// position returns where index sits in s.log, or false if it's out of the
+// currently-retained range.
+func (s *memStorage) position(index uint64) (int, bool) {
+	if index <= s.baseIndex {
+		return 0, false
+	}
+	pos := index - s.baseIndex - 1
+	if pos >= uint64(len(s.log)) {
+		return 0, false
+	}
+	return int(pos), true
+}
+
 func (s *memStorage) TruncateFrom(index uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if index == 0 {
-		s.log = nil
+	pos, ok := s.position(index)
+	if !ok {
 		return nil
 	}
-	if index-1 < uint64(len(s.log)) {
-		s.log = s.log[:index-1]
-	}
+	s.log = s.log[:pos]
 	return nil
 }
 
@@ -142,7 +170,45 @@ func (s *memStorage) LoadLog() ([]LogEntry, error) {
 	return out, nil
 }
 
-// testStateMachine records applied commands in order, for assertions.
+func (s *memStorage) SaveSnapshot(lastIncludedIndex, lastIncludedTerm uint64, data []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hasSnapshot = true
+	s.snapshotIndex = lastIncludedIndex
+	s.snapshotTerm = lastIncludedTerm
+	s.snapshotData = append([]byte(nil), data...)
+	return nil
+}
+
+func (s *memStorage) LoadSnapshot() (lastIncludedIndex, lastIncludedTerm uint64, data []byte, ok bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.hasSnapshot {
+		return 0, 0, nil, false, nil
+	}
+	return s.snapshotIndex, s.snapshotTerm, append([]byte(nil), s.snapshotData...), true, nil
+}
+
+func (s *memStorage) DiscardLogThrough(index uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if index <= s.baseIndex {
+		return nil
+	}
+	drop := index - s.baseIndex
+	if drop > uint64(len(s.log)) {
+		drop = uint64(len(s.log))
+	}
+	s.log = append([]LogEntry(nil), s.log[drop:]...)
+	s.baseIndex = index
+	return nil
+}
+
+// testStateMachine records applied commands in order, for assertions. Its
+// Snapshot/Restore round-trip through the same applied-commands slice
+// (rather than some derived "current state"), which is enough to exercise
+// Node's own snapshot-triggering/restoring logic without needing a real KV
+// engine in every algorithm test.
 type testStateMachine struct {
 	mu      sync.Mutex
 	applied [][]byte
@@ -163,18 +229,46 @@ func (sm *testStateMachine) Applied() [][]byte {
 	return out
 }
 
+func (sm *testStateMachine) Snapshot() ([]byte, error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return json.Marshal(sm.applied)
+}
+
+func (sm *testStateMachine) Restore(data []byte) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	var applied [][]byte
+	if err := json.Unmarshal(data, &applied); err != nil {
+		return err
+	}
+	sm.applied = applied
+	return nil
+}
+
 // testCluster wires up n in-process Nodes over a fakeNetwork, each with its
 // own memStorage and testStateMachine.
 type testCluster struct {
-	net     *fakeNetwork
-	nodes   []*Node
-	sms     []*testStateMachine
-	ids     []string
-	mu      sync.Mutex
-	stopped map[string]bool
+	net      *fakeNetwork
+	nodes    []*Node
+	sms      []*testStateMachine
+	storages []*memStorage
+	ids      []string
+	mu       sync.Mutex
+	stopped  map[string]bool
 }
 
 func newTestCluster(t *testing.T, n int) *testCluster {
+	t.Helper()
+	return newTestClusterWithOptions(t, n, testOptions())
+}
+
+// newTestClusterWithOptions is newTestCluster with caller-supplied Options
+// -- used by snapshot tests, which need a small SnapshotThreshold that
+// testOptions()'s default (0, disabled) deliberately doesn't set, so every
+// other algorithm test keeps running exactly as it did before snapshotting
+// existed.
+func newTestClusterWithOptions(t *testing.T, n int, opts Options) *testCluster {
 	t.Helper()
 
 	ids := make([]string, n)
@@ -193,13 +287,15 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 			}
 		}
 		sm := &testStateMachine{}
-		node, err := NewNode(id, peers, newMemStorage(), &fakeTransport{net: net, selfID: id}, sm, testLogger(), testOptions())
+		storage := newMemStorage()
+		node, err := NewNode(id, peers, storage, &fakeTransport{net: net, selfID: id}, sm, testLogger(), opts)
 		if err != nil {
 			t.Fatalf("NewNode(%s): %v", id, err)
 		}
 		net.register(node)
 		tc.nodes = append(tc.nodes, node)
 		tc.sms = append(tc.sms, sm)
+		tc.storages = append(tc.storages, storage)
 	}
 
 	return tc

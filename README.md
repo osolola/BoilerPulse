@@ -2,7 +2,7 @@
 
 **A distributed key-value store, built from scratch — hand-rolled Raft consensus, a custom LSM storage engine, and a real gateway — stress-tested with a campus-events workload and chaos-engineered against itself.**
 
-The campus theme is the excuse; the distributed system is the point. Nothing here wraps etcd, Redis, or Postgres — the consensus algorithm, the on-disk storage format, and the write-ahead log are all implemented from the paper up, in Go, with 220 tests and a near 1:1 test-to-implementation-code ratio backing them.
+The campus theme is the excuse; the distributed system is the point. Nothing here wraps etcd, Redis, or Postgres — the consensus algorithm, the on-disk storage format, and the write-ahead log are all implemented from the paper up, in Go, with 243 tests and a near 1:1 test-to-implementation-code ratio backing them.
 
 ![Dashboard](docs/images/dashboard.png)
 
@@ -137,7 +137,7 @@ make race   # race detector — everything is clean under it
 make lint   # gofmt + go vet
 ```
 
-220 test functions across the Go backend (~6,100 lines of test code against ~6,800 lines of implementation) plus frontend typecheck/lint — including explicit crash-recovery tests (torn WAL/Raft-log writes, checksum corruption), Raft algorithm tests against a fast in-memory fake network, real-gRPC-over-localhost tests, full multi-node cluster integration tests, and `tests/failure`'s four chaos scenarios against a real cluster. Several of the bugs described above were caught specifically *because* of this — a fake-network test wouldn't have reproduced the replication flood, and no amount of `curl` would have caught either CORS bug.
+243 test functions across the Go backend (~7,100 lines of test code against ~7,800 lines of implementation) plus frontend typecheck/lint — including explicit crash-recovery tests (torn WAL/Raft-log writes, checksum corruption), Raft algorithm tests against a fast in-memory fake network, real-gRPC-over-localhost tests, full multi-node cluster integration tests, and `tests/failure`'s four chaos scenarios against a real cluster. Several of the bugs described above were caught specifically *because* of this — a fake-network test wouldn't have reproduced the replication flood, and no amount of `curl` would have caught either CORS bug.
 
 ## Documentation
 

@@ -30,6 +30,10 @@ func (noopTransport) SendAppendEntries(ctx context.Context, peer string, args *r
 	return nil, context.Canceled
 }
 
+func (noopTransport) SendInstallSnapshot(ctx context.Context, peer string, args *raft.InstallSnapshotArgs) (*raft.InstallSnapshotReply, error) {
+	return nil, context.Canceled
+}
+
 type memStorage struct{}
 
 func (memStorage) SaveTermAndVote(term uint64, votedFor string) error { return nil }
@@ -37,10 +41,17 @@ func (memStorage) LoadTermAndVote() (uint64, string, error)           { return 0
 func (memStorage) AppendEntries(entries []raft.LogEntry) error        { return nil }
 func (memStorage) TruncateFrom(index uint64) error                    { return nil }
 func (memStorage) LoadLog() ([]raft.LogEntry, error)                  { return nil, nil }
+func (memStorage) SaveSnapshot(lastIncludedIndex, lastIncludedTerm uint64, data []byte) error {
+	return nil
+}
+func (memStorage) LoadSnapshot() (uint64, uint64, []byte, bool, error) { return 0, 0, nil, false, nil }
+func (memStorage) DiscardLogThrough(index uint64) error                { return nil }
 
 type noopStateMachine struct{}
 
 func (noopStateMachine) Apply(command []byte) error { return nil }
+func (noopStateMachine) Snapshot() ([]byte, error)  { return nil, nil }
+func (noopStateMachine) Restore(data []byte) error  { return nil }
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))

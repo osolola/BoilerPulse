@@ -1,8 +1,10 @@
 package storage
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestCommandEncodeDecodeRoundTrip(t *testing.T) {
@@ -78,5 +80,103 @@ func TestRaftStateMachineApplyUnknownOp(t *testing.T) {
 	cmd, _ := EncodeCommand(Command{Op: 99, Key: "k"})
 	if err := sm.Apply(cmd); err == nil {
 		t.Error("Apply with unknown op returned nil error, want an error")
+	}
+}
+
+func TestRaftStateMachineSnapshotRestoreRoundTrip(t *testing.T) {
+	source := NewMemStore()
+	sm := NewRaftStateMachine(source)
+
+	if err := source.Put("a", []byte("1"), ConsistencyEventual, 0); err != nil {
+		t.Fatalf("Put a: %v", err)
+	}
+	if err := source.Put("b", []byte("2"), ConsistencyStrong, 0); err != nil {
+		t.Fatalf("Put b: %v", err)
+	}
+	if err := source.Put("c", []byte("3"), ConsistencyCritical, time.Hour); err != nil {
+		t.Fatalf("Put c: %v", err)
+	}
+
+	data, err := sm.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	// Restore into a completely separate, empty engine -- this is exactly
+	// what happens when a follower installs a leader's snapshot.
+	target := NewMemStore()
+	targetSM := NewRaftStateMachine(target)
+	if err := targetSM.Restore(data); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	for _, tc := range []struct {
+		key         string
+		wantValue   string
+		wantConsist Consistency
+	}{
+		{"a", "1", ConsistencyEventual},
+		{"b", "2", ConsistencyStrong},
+		{"c", "3", ConsistencyCritical},
+	} {
+		entry, err := target.Get(tc.key)
+		if err != nil {
+			t.Errorf("Get(%q) after restore: %v", tc.key, err)
+			continue
+		}
+		if string(entry.Value) != tc.wantValue || entry.Consistency != tc.wantConsist {
+			t.Errorf("restored %q = (%s, %s), want (%s, %s)", tc.key, entry.Value, entry.Consistency, tc.wantValue, tc.wantConsist)
+		}
+	}
+}
+
+func TestRaftStateMachineSnapshotIsDeterministic(t *testing.T) {
+	// Two snapshots of identical state must encode to identical bytes --
+	// map iteration order is randomized in Go, so this only holds because
+	// Snapshot sorts by key before encoding.
+	engine := NewMemStore()
+	sm := NewRaftStateMachine(engine)
+	for _, k := range []string{"z", "a", "m", "b", "y"} {
+		if err := engine.Put(k, []byte(k), ConsistencyEventual, 0); err != nil {
+			t.Fatalf("Put %q: %v", k, err)
+		}
+	}
+
+	first, err := sm.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot (first): %v", err)
+	}
+	second, err := sm.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot (second): %v", err)
+	}
+	if string(first) != string(second) {
+		t.Errorf("two snapshots of the same unchanged state produced different bytes:\nfirst:  %s\nsecond: %s", first, second)
+	}
+}
+
+func TestRaftStateMachineRestoreSkipsExpiredEntries(t *testing.T) {
+	// Both entries are encoded directly (not via Put+sleep), so the
+	// already-expired one is deterministic and the test stays fast.
+	entries := []snapshotEntry{
+		{Key: "live", Value: []byte("v"), Consistency: ConsistencyEventual, ExpiresAt: time.Now().Add(time.Hour)},
+		{Key: "already-expired", Value: []byte("v"), Consistency: ConsistencyEventual, ExpiresAt: time.Now().Add(-time.Minute)},
+	}
+	data, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	target := NewMemStore()
+	targetSM := NewRaftStateMachine(target)
+	if err := targetSM.Restore(data); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	if _, err := target.Get("live"); err != nil {
+		t.Errorf("Get(live) after restore: %v, want it present", err)
+	}
+	if _, err := target.Get("already-expired"); !errors.Is(err, ErrKeyNotFound) {
+		t.Errorf("Get(already-expired) after restore = %v, want ErrKeyNotFound (should not have been resurrected)", err)
 	}
 }

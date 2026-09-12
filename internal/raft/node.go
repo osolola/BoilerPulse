@@ -33,7 +33,14 @@ type Node struct {
 	// before any RPC reply that depends on a change to it).
 	currentTerm uint64
 	votedFor    string
-	log         []LogEntry // log[i] has Index == i+1; no snapshotting, so this is the whole log
+	log         []LogEntry // log[i] has Index == logBaseIndex+i+1 (see log.go)
+
+	// logBaseIndex/logBaseTerm describe the most recent snapshot: every
+	// entry with Index <= logBaseIndex has been compacted out of log and
+	// storage, its effect captured in the snapshot instead. Both are 0
+	// (never set) for a node that has never snapshotted.
+	logBaseIndex uint64
+	logBaseTerm  uint64
 
 	// Volatile state.
 	state       State
@@ -76,6 +83,27 @@ func NewNode(id string, peers []string, storage Storage, transport Transport, sm
 	if err != nil {
 		return nil, fmt.Errorf("loading persisted term/vote: %w", err)
 	}
+
+	// A snapshot, if one exists, must be restored into the state machine
+	// before the surviving log tail is even considered -- LoadLog() only
+	// returns what's after the snapshot's LastIncludedIndex to begin with
+	// (the snapshot IS the rest of history). commitIndex/lastApplied start
+	// at the snapshot's boundary rather than 0: everything up to there is
+	// already reflected in the restored state machine, exactly as if it
+	// had been applied entry by entry.
+	var logBaseIndex, logBaseTerm, commitIndex, lastApplied uint64
+	lastIncludedIndex, lastIncludedTerm, snapshotData, hasSnapshot, err := storage.LoadSnapshot()
+	if err != nil {
+		return nil, fmt.Errorf("loading persisted snapshot: %w", err)
+	}
+	if hasSnapshot {
+		if err := sm.Restore(snapshotData); err != nil {
+			return nil, fmt.Errorf("restoring state machine from snapshot: %w", err)
+		}
+		logBaseIndex, logBaseTerm = lastIncludedIndex, lastIncludedTerm
+		commitIndex, lastApplied = lastIncludedIndex, lastIncludedIndex
+	}
+
 	log, err := storage.LoadLog()
 	if err != nil {
 		return nil, fmt.Errorf("loading persisted log: %w", err)
@@ -97,6 +125,10 @@ func NewNode(id string, peers []string, storage Storage, transport Transport, sm
 		currentTerm:  term,
 		votedFor:     votedFor,
 		log:          log,
+		logBaseIndex: logBaseIndex,
+		logBaseTerm:  logBaseTerm,
+		commitIndex:  commitIndex,
+		lastApplied:  lastApplied,
 		state:        Follower,
 		applyNotify:  make(chan struct{}, 1),
 		replicateCh:  replicateCh,

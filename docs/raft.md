@@ -2,17 +2,17 @@
 
 `internal/raft` is a hand-rolled implementation of the Raft consensus
 algorithm (Ongaro & Ousterhout, "In Search of an Understandable Consensus
-Algorithm") — leader election and log replication, no snapshotting/log
-compaction yet (explicitly out of scope for this milestone).
+Algorithm") — leader election, log replication, and log compaction via
+snapshotting (§7 of the paper).
 
 ## Design: transport- and storage-agnostic core
 
 `raft.Node` depends only on three interfaces:
 
 ```
-Transport     -- sends RequestVote/AppendEntries RPCs to a named peer
-Storage       -- persists currentTerm, votedFor, and the log
-StateMachine  -- Apply(command []byte) error, called once per committed entry
+Transport     -- sends RequestVote/AppendEntries/InstallSnapshot RPCs to a named peer
+Storage       -- persists currentTerm, votedFor, the log, and the latest snapshot
+StateMachine  -- Apply(command []byte) error, plus Snapshot()/Restore() for compaction
 ```
 
 This is deliberately the same shape etcd's raft library uses, and for the
@@ -79,6 +79,21 @@ never imports gRPC or protobuf.
   `internal/storage/wal`; `currentTerm`/`votedFor` use the same
   temp-file/fsync/rename/fsync-dir atomic-replace protocol
   `internal/storage/lsm` uses for SSTable flushes.
+- **Log compaction via snapshotting**: once applied entries pass
+  `Options.SnapshotThreshold` (default 1000) since the last snapshot, the
+  state machine is snapshotted (`StateMachine.Snapshot`,
+  `internal/storage.RaftStateMachine` serializes the whole KV dataset via
+  `Scan("")`) and the covered log prefix is discarded from both memory and
+  disk (`Node.logBaseIndex`/`logBaseTerm` track the boundary; every log
+  helper in `log.go` is offset-aware). A follower whose `nextIndex` has
+  fallen behind the leader's compacted prefix — most commonly, one that was
+  disconnected for a while — receives the whole snapshot in one
+  `InstallSnapshot` RPC instead of AppendEntries, since the entries it
+  needs no longer exist anywhere on the leader.
+  `TestDisconnectedFollowerCatchesUpViaInstallSnapshot` (`internal/raft`)
+  proves this end to end with a fake network; `TestInstallSnapshotOverRealGRPC`
+  (`internal/raft/rpc`) proves the same RPC round-trips correctly through
+  real protobuf encoding.
 
 ## What's real vs. simplified
 
@@ -93,8 +108,17 @@ manually verified against the compiled `cmd/node` binary (3 processes,
 `kill -9` the leader, confirm re-election and continued writes).
 
 **Simplified / explicitly deferred**:
-- No snapshotting or log compaction — the log grows unboundedly. Fine at
-  this project's scale; noted as future work.
+- **Snapshots are sent whole, not chunked.** A real production Raft (and
+  the paper itself) chunks a large snapshot across multiple RPCs to bound
+  per-message memory and let a failed transfer resume rather than restart.
+  At this project's scale (a demo KV dataset, not gigabytes of state) that
+  would be meaningful complexity without a real payoff — `InstallSnapshot`
+  sends the entire serialized dataset in one message.
+- **A follower installing a snapshot always discards its entire local log**,
+  rather than preserving a suffix that might already match the snapshot's
+  boundary (an optimization the paper mentions but doesn't require). Costs
+  a handful of already-known entries potentially being re-sent afterward —
+  a performance concession only, never a correctness one.
 - No dynamic cluster membership changes — `peers` is static, set at startup
   via config. Adding/removing nodes means restarting with a new config.
 - No leader-forwarding at the gateway layer yet — a client must know which
@@ -121,5 +145,22 @@ curl localhost:8080/v1/kv/event:mackey   # replicated to a different node
 
 make stop
 ```
+
+To actually see compaction happen (the default threshold is 1000 applied
+entries, well past anything `make cluster`'s own traffic generates quickly):
+
+```bash
+for i in $(seq 1 1100); do curl -s -o /dev/null -X PUT localhost:8090/v1/kv/k$i -d '{"value":"x"}'; done
+ls data/cluster/node-1/raft/   # raft-snapshot.bin now exists; raft-log.bin is small again
+grep snapshot .cluster/node-1.log   # "compacted raft log via snapshot" ... through_index=1000
+```
+
+Manually verified: all three nodes independently compacted at index 1000
+(each logging `snapshot_bytes` in the hundred-KB range for ~1000 keys),
+`raft-log.bin` shrank back down to just the post-snapshot tail instead of
+growing unboundedly, and killing and restarting a node afterward correctly
+served both a pre-snapshot key (restored from `raft-snapshot.bin`) and a
+post-snapshot key (replayed from the small remaining log) with no data loss
+and no full-history replay.
 
 See `docs/architecture.md` for how this fits into the rest of the system.
