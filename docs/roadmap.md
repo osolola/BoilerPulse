@@ -241,6 +241,26 @@ implemented and tested — nothing here is marked done on the basis of intent.
   something to do autonomously. See `docs/deployment.md` for exactly what
   remains.
 
+## Post-Milestone-11 improvements
+
+Ongoing hardening beyond the original 11-milestone spec, each closing a gap
+the project's own docs already flagged. One self-contained change at a time.
+
+### Day 1 — Prometheus metrics (`internal/metrics`)
+
+Real instrumentation, not a stub: `GET /metrics` on every node and the
+gateway, wired into the actual request path (`Middleware`) and actual Raft/
+storage/cache/workload internals via pull-based gauge sources
+(`RegisterRaftSource`, `RegisterStorageSource`, `RegisterCacheSource`,
+`RegisterWorkloadSource`) so a scrape always reads live state with no
+background sync goroutine. HTTP metrics label by matched route *pattern*,
+not raw path — labelling by path would create one time series per KV key
+ever written. 9 new tests in `internal/metrics`; all 229 tests across the
+repo still pass under `-race`. Manually verified against a real 3-node
+cluster: Raft term/leader/commit-index tracked real election state, a real
+`PUT` immediately moved the HTTP counters and latency histogram, memtable
+size moved with real writes. See `docs/observability.md`.
+
 Everything else in the repo tree (`internal/notifications`,
 `tests/distributed`, `tests/end_to_end`) exists as a directory with a
 README explaining what will live there and which milestone adds it — deliberately no

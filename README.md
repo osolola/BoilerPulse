@@ -98,6 +98,7 @@ See [`docs/architecture.md`](docs/architecture.md) for the full picture, [`docs/
 - **Consensus**: hand-rolled Raft over a real gRPC transport (`pkg/protocol/raft.proto`) — not etcd, not a wrapper around one.
 - **Chaos engineering**: per-node fault injection (kill/latency/packet-drop/partition) at the transport layer, a CLI, and live dashboard controls.
 - **Benchmarking**: a real HTTP load generator with named traffic-curve scenarios, reporting measured throughput/latency/error-rate.
+- **Observability**: Prometheus metrics (`GET /metrics` on every node and the gateway) — HTTP request rate/latency by route, live Raft state (term, leader, commit/apply lag), storage internals (memtable size, SSTable count), cache hit rate, and workload mode.
 - **CI**: GitHub Actions — gofmt, vet, test, race, frontend lint/build, Docker build checks.
 
 ## Quick start
@@ -142,7 +143,7 @@ make lint   # gofmt + go vet
 
 Every subsystem has a doc explaining the design *and* what's simplified — nothing here claims to be more finished than it is:
 
-[`architecture`](docs/architecture.md) · [`raft`](docs/raft.md) · [`storage-engine`](docs/storage-engine.md) · [`gateway`](docs/gateway.md) · [`event-ingestion`](docs/event-ingestion.md) · [`workload-model`](docs/workload-model.md) · [`prediction`](docs/prediction.md) · [`frontend`](docs/frontend.md) · [`failure-testing`](docs/failure-testing.md) · [`benchmarking`](docs/benchmarking.md) · [`deployment`](docs/deployment.md) · [`roadmap`](docs/roadmap.md)
+[`architecture`](docs/architecture.md) · [`raft`](docs/raft.md) · [`storage-engine`](docs/storage-engine.md) · [`gateway`](docs/gateway.md) · [`event-ingestion`](docs/event-ingestion.md) · [`workload-model`](docs/workload-model.md) · [`prediction`](docs/prediction.md) · [`frontend`](docs/frontend.md) · [`failure-testing`](docs/failure-testing.md) · [`benchmarking`](docs/benchmarking.md) · [`observability`](docs/observability.md) · [`deployment`](docs/deployment.md) · [`roadmap`](docs/roadmap.md)
 
 ## License
 

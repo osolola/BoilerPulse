@@ -25,6 +25,7 @@ import (
 	"boilerpulse/internal/api"
 	"boilerpulse/internal/config"
 	"boilerpulse/internal/logging"
+	"boilerpulse/internal/metrics"
 	"boilerpulse/internal/raft"
 	raftrpc "boilerpulse/internal/raft/rpc"
 	"boilerpulse/internal/storage"
@@ -56,6 +57,20 @@ func main() {
 	defer engine.Close()
 
 	server := api.NewServer(engine, logger, cfg.NodeID)
+
+	// Metrics are pull-based (see internal/metrics): registering the engine
+	// as a source here means /metrics always reports live storage state,
+	// with no background updater goroutine to keep in sync.
+	nodeMetrics := metrics.New("kv-node", cfg.NodeID)
+	nodeMetrics.RegisterStorageSource(func() metrics.StorageStats {
+		st := engine.Stats()
+		return metrics.StorageStats{
+			MemtableBytes:   st.MemtableBytes,
+			MemtableEntries: st.MemtableEntries,
+			SSTables:        st.SSTables,
+		}
+	})
+	server.SetMetrics(nodeMetrics)
 	server.SetAllowedOrigin(cfg.CORSOrigin)
 
 	var raftNode *raft.Node
@@ -76,6 +91,18 @@ func main() {
 		defer grpcServer.Stop()
 
 		server.SetProposer(&raftProposer{node: raftNode})
+
+		node := raftNode // capture for the metrics callback
+		nodeMetrics.RegisterRaftSource(func() metrics.RaftStats {
+			st := node.Status()
+			return metrics.RaftStats{
+				Term:         st.Term,
+				IsLeader:     st.State == raft.Leader,
+				CommitIndex:  st.CommitIndex,
+				LastApplied:  st.LastApplied,
+				LastLogIndex: st.LastLogIndex,
+			}
+		})
 	}
 
 	if cfg.AdminAddr != "" {

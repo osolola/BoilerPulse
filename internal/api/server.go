@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"boilerpulse/internal/metrics"
 	"boilerpulse/internal/storage"
 )
 
@@ -21,6 +22,7 @@ type Server struct {
 	mux           *http.ServeMux
 	proposer      Proposer // optional; nil means writes go straight to engine
 	allowedOrigin string
+	metrics       *metrics.Metrics // optional; nil disables /metrics and instrumentation
 }
 
 // NewServer builds a Server ready to handle requests. CORS defaults to "*"
@@ -59,6 +61,15 @@ func (s *Server) SetAllowedOrigin(origin string) {
 	s.allowedOrigin = origin
 }
 
+// SetMetrics enables Prometheus instrumentation and the /metrics endpoint.
+// Call before serving traffic (cmd/node does). Left unset in tests and
+// anywhere metrics aren't wanted, in which case /metrics 404s and no
+// instrumentation runs.
+func (s *Server) SetMetrics(m *metrics.Metrics) {
+	s.metrics = m
+	s.mux.Handle("GET /metrics", m.Handler())
+}
+
 func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /v1/kv/{key}", s.handlePut)
 	s.mux.HandleFunc("GET /v1/kv/{key}", s.handleGet)
@@ -79,6 +90,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if s.metrics != nil {
+		s.metrics.Middleware(s.mux).ServeHTTP(w, r)
 		return
 	}
 	s.mux.ServeHTTP(w, r)

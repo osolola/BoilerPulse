@@ -17,6 +17,7 @@ import (
 
 	"boilerpulse/internal/api"
 	"boilerpulse/internal/cache"
+	"boilerpulse/internal/metrics"
 	"boilerpulse/internal/prediction"
 	"boilerpulse/internal/workload"
 )
@@ -85,6 +86,7 @@ type Gateway struct {
 	cache      *cache.LRU
 	workload   *workload.Engine
 	predictor  *prediction.Model
+	metrics    *metrics.Metrics // optional; nil disables /metrics and instrumentation
 
 	mu         sync.RWMutex
 	leaderID   string
@@ -132,6 +134,22 @@ func New(nodes []Node, logger *slog.Logger, opts Options) *Gateway {
 	return g
 }
 
+// SetMetrics enables Prometheus instrumentation and the /metrics endpoint,
+// and wires the gateway's cache and workload engine to it as pull-based
+// gauge sources. Call before Start (cmd/gateway does).
+func (g *Gateway) SetMetrics(m *metrics.Metrics) {
+	g.metrics = m
+	g.mux.Handle("GET /metrics", m.Handler())
+
+	m.RegisterCacheSource(func() metrics.CacheStats {
+		s := g.cache.Stats()
+		return metrics.CacheStats{Hits: s.Hits, Misses: s.Misses, Evictions: s.Evictions}
+	})
+	m.RegisterWorkloadSource(func() metrics.WorkloadStats {
+		return metrics.WorkloadStats{Mode: string(g.workload.Mode()), RPS: g.workload.RPS()}
+	})
+}
+
 func (g *Gateway) routes() {
 	g.mux.HandleFunc("PUT /v1/kv/{key}", g.rateLimited(g.handleWrite))
 	g.mux.HandleFunc("DELETE /v1/kv/{key}", g.rateLimited(g.handleWrite))
@@ -168,6 +186,10 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if g.metrics != nil {
+		g.metrics.Middleware(g.mux).ServeHTTP(w, r)
 		return
 	}
 	g.mux.ServeHTTP(w, r)

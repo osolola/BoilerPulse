@@ -15,6 +15,7 @@ import (
 	"boilerpulse/internal/config"
 	"boilerpulse/internal/gateway"
 	"boilerpulse/internal/logging"
+	"boilerpulse/internal/metrics"
 )
 
 func main() {
@@ -57,6 +58,7 @@ func main() {
 	}
 
 	gw := gateway.New(nodes, logger, opts)
+	gw.SetMetrics(metrics.New("gateway", "gateway"))
 	gw.Start(context.Background())
 	defer gw.Stop()
 

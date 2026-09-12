@@ -298,3 +298,24 @@ func toStorageEntry(e sstable.Entry) storage.Entry {
 func entrySize(key string, e storage.Entry) int {
 	return len(key) + len(e.Value) + 32
 }
+
+// Stats is a point-in-time view of engine internals, for observability
+// (internal/metrics scrapes this). It is deliberately a snapshot under the
+// read lock rather than live counters: these values are cheap to read and
+// only meaningful together.
+type Stats struct {
+	MemtableBytes   int
+	MemtableEntries int
+	SSTables        int
+}
+
+// Stats returns a snapshot of engine internals.
+func (e *Engine) Stats() Stats {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return Stats{
+		MemtableBytes:   e.memtableSize,
+		MemtableEntries: len(e.memtable),
+		SSTables:        len(e.sstables),
+	}
+}
