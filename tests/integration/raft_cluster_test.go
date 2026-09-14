@@ -52,11 +52,23 @@ func (p *memberProposer) Status() api.RaftStatus {
 
 func testRaftOptions() raft.Options {
 	return raft.Options{
-		MinElectionTimeout: 80 * time.Millisecond,
-		MaxElectionTimeout: 160 * time.Millisecond,
-		HeartbeatInterval:  25 * time.Millisecond,
+		// Wider than internal/raft's own fake-network tests use (that
+		// package never touches a real disk or a real socket, so it can
+		// afford much tighter margins reliably). These tests use real
+		// gRPC and real file-backed storage, both exposed to genuine OS
+		// scheduling/I/O variance -- under `-race` on a loaded/shared CI
+		// runner, the original tighter values here (80/160/25/200ms)
+		// occasionally let a real heartbeat arrive late enough to trigger
+		// a spurious re-election mid-test, flaking
+		// TestThreeNodeClusterElectsLeaderAndReplicatesWrites and its
+		// sibling with "PUT status = 503, want 204" -- the leader the
+		// test found really did lose leadership between being found and
+		// being written to, not a product bug.
+		MinElectionTimeout: 200 * time.Millisecond,
+		MaxElectionTimeout: 400 * time.Millisecond,
+		HeartbeatInterval:  50 * time.Millisecond,
 		TickInterval:       5 * time.Millisecond,
-		RPCTimeout:         200 * time.Millisecond,
+		RPCTimeout:         400 * time.Millisecond,
 	}
 }
 
