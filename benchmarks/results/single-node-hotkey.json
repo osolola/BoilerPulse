@@ -1,18 +1,18 @@
 {
   "scenario": "hotkey",
   "topology": "single-node",
-  "started_at": "2026-08-12T14:28:58.945579Z",
+  "started_at": "2026-09-14T02:13:23.787333Z",
   "duration_ms": 20001,
-  "total_requests": 599,
+  "total_requests": 598,
   "error_count": 0,
   "error_rate": 0,
-  "achieved_rps": 29.948295443350155,
-  "latency_p50_ms": 1.28,
-  "latency_p95_ms": 5.45,
-  "latency_p99_ms": 7.269,
-  "latency_max_ms": 10.132,
+  "achieved_rps": 29.89830040569988,
+  "latency_p50_ms": 1.137,
+  "latency_p95_ms": 5.096,
+  "latency_p99_ms": 6.896,
+  "latency_max_ms": 9.665,
   "status_counts": {
-    "200": 568,
-    "204": 31
+    "200": 565,
+    "204": 33
   }
 }

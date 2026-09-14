@@ -246,6 +246,21 @@ implemented and tested — nothing here is marked done on the basis of intent.
 Ongoing hardening beyond the original 11-milestone spec, each closing a gap
 the project's own docs already flagged. One self-contained change at a time.
 
+### Day 1 — Prometheus metrics (`internal/metrics`)
+
+Real instrumentation, not a stub: `GET /metrics` on every node and the
+gateway, wired into the actual request path (`Middleware`) and actual Raft/
+storage/cache/workload internals via pull-based gauge sources
+(`RegisterRaftSource`, `RegisterStorageSource`, `RegisterCacheSource`,
+`RegisterWorkloadSource`) so a scrape always reads live state with no
+background sync goroutine. HTTP metrics label by matched route *pattern*,
+not raw path — labelling by path would create one time series per KV key
+ever written. 9 new tests in `internal/metrics`; all 229 tests across the
+repo still pass under `-race`. Manually verified against a real 3-node
+cluster: Raft term/leader/commit-index tracked real election state, a real
+`PUT` immediately moved the HTTP counters and latency histogram, memtable
+size moved with real writes. See `docs/observability.md`.
+
 ### Day 2 — Raft log snapshotting + log compaction (`internal/raft`)
 
 Closes a real limitation that actually caused a production-shaped bug: with
@@ -301,20 +316,61 @@ same session that produced `docs/benchmarking.md`'s WAL-fsync findings).
   InstallSnapshot always discards the whole local log rather than
   preserving a matching suffix).
 
-### Day 1 — Prometheus metrics (`internal/metrics`)
+### Day 3 — Group-commit batching for the WAL fsync (`internal/raft`, `internal/storage`)
 
-Real instrumentation, not a stub: `GET /metrics` on every node and the
-gateway, wired into the actual request path (`Middleware`) and actual Raft/
-storage/cache/workload internals via pull-based gauge sources
-(`RegisterRaftSource`, `RegisterStorageSource`, `RegisterCacheSource`,
-`RegisterWorkloadSource`) so a scrape always reads live state with no
-background sync goroutine. HTTP metrics label by matched route *pattern*,
-not raw path — labelling by path would create one time series per KV key
-ever written. 9 new tests in `internal/metrics`; all 229 tests across the
-repo still pass under `-race`. Manually verified against a real 3-node
-cluster: Raft term/leader/commit-index tracked real election state, a real
-`PUT` immediately moved the HTTP counters and latency histogram, memtable
-size moved with real writes. See `docs/observability.md`.
+Fixes the write-throughput ceiling `docs/benchmarking.md` documented (not
+fixed) in Milestone 10 -- and, in the process of verifying the fix,
+discovers a second, deeper bottleneck the first one had been masking.
+
+- `Propose` no longer appends and fsyncs its own entry directly: it
+  enqueues onto a channel (new `appendLoop`/`appendBatch` in
+  `internal/raft/apply.go`), and a single goroutine drains whatever else
+  has piled up (capped at 64 -- `maxAppendBatchSize`) and persists the
+  whole batch with one `Storage.AppendEntries` call, one fsync covering
+  however many proposals arrived together. `internal/storage/lsm.Engine`
+  gained the identical pattern (`opCh`/`opLoop` in `engine.go`) for direct
+  (non-Raft) writes, backed by a new `wal.Writer.AppendBatch`. Also capped:
+  how many entries one `AppendEntries` RPC carries
+  (`maxReplicationBatchSize`, `replication.go`) -- an early, uncapped
+  version of this let a single RPC to a far-behind follower grow large
+  enough to blow past `RPCTimeout`, and since a timed-out send never
+  advances `nextIndex`, the same (by then even larger) backlog just
+  retried forever instead of making progress. Found by actually
+  benchmarking the fix, not reasoned about in the abstract.
+- Tests: `TestConcurrentProposalsCoalesceIntoFewerAppendCalls` and
+  `TestConcurrentPutsCoalesceIntoFewerWALBatches` prove real fsync-count
+  reduction (50 concurrent writers -> single-digit fsyncs), not just
+  end-state correctness; `TestConcurrentPutsToSameKeyApplyInSeqOrder`
+  guards the subtle correctness risk this design introduces (two
+  concurrent writers to the same key must still apply in sequence-assigned
+  order, never the reverse -- a lost update). All 246 tests across the
+  repo pass under `-race`.
+- Re-ran every benchmark scenario from Milestone 10 against the fixed
+  code: `finals`, `athletics`, and `hotkey` all stayed at 0% errors with
+  meaningfully *better* tail latency than before (`athletics`'s p99
+  36.0ms -> 26.8ms, max 774.6ms -> 50.0ms); a live leader failure during
+  load dropped from p99 484ms to **29.5ms** -- a new leader now catches up
+  a backlog in one batched append instead of replaying it one fsync at a
+  time.
+- **`emergency` (the scenario the original ceiling was measured on) did
+  not improve -- still ~36% errors, and p99 actually got *worse* (541ms ->
+  1423ms).** Diagnosed live using Day 1's `boilerpulse_raft_apply_lag`
+  metric: `commit_index` climbs at a healthy, steady rate throughout (the
+  fix is working -- the Raft log itself is no longer the bottleneck), but
+  `lastApplied` falls further behind every second, unboundedly. Root
+  cause: `applyPending` applies committed entries to the state machine
+  strictly one at a time, so there's structurally never more than one
+  `Put` in flight from that path -- the *apply* path gets zero benefit
+  from group commit, no matter how well-batched proposing and replicating
+  are. Found and documented, not fixed this milestone -- a real fix means
+  batching the apply path too (a real `StateMachine` interface question,
+  needing the same care Day 2's `Snapshot`/`Restore` addition got, plus a
+  same-key-ordering guarantee equivalent to the propose side's), which
+  deserves its own focused pass rather than a rushed addition here.
+- `docs/benchmarking.md`, `docs/storage-engine.md`, and `docs/raft.md` all
+  updated with the honest before/after numbers and the newly-identified
+  apply-path bottleneck -- exactly the kind of finding this project's
+  benchmarking methodology exists to surface, not hide.
 
 Everything else in the repo tree (`internal/notifications`,
 `tests/distributed`, `tests/end_to_end`) exists as a directory with a

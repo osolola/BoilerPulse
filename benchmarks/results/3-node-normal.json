@@ -1,18 +1,18 @@
 {
   "scenario": "normal",
   "topology": "3-node",
-  "started_at": "2026-08-12T14:49:51.001378Z",
-  "duration_ms": 20002,
+  "started_at": "2026-09-14T02:08:09.59884Z",
+  "duration_ms": 20001,
   "total_requests": 199,
   "error_count": 0,
   "error_rate": 0,
-  "achieved_rps": 9.948926365590827,
-  "latency_p50_ms": 2.014,
-  "latency_p95_ms": 18.069,
-  "latency_p99_ms": 19.21,
-  "latency_max_ms": 19.759,
+  "achieved_rps": 9.94946583805282,
+  "latency_p50_ms": 1.537,
+  "latency_p95_ms": 17.056,
+  "latency_p99_ms": 20.146,
+  "latency_max_ms": 112.648,
   "status_counts": {
-    "200": 161,
-    "204": 38
+    "200": 158,
+    "204": 41
   }
 }

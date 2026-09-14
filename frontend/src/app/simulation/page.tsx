@@ -13,12 +13,14 @@ export default function SimulationPage() {
     <main className="mx-auto max-w-5xl px-6 py-10">
       <h1 className="text-2xl font-semibold tracking-tight">Traffic Simulator</h1>
       <p className="mt-1 text-sm text-black/60 dark:text-white/60">
-        Real recorded benchmark runs (Milestone 10) from <code>cmd/simulator</code> (
-        <code>boilerpulse-sim</code>) against a compiled single-node and 3-node cluster on{" "}
-        {RECORDED_AT} — not live, not estimated. See{" "}
+        Real recorded benchmark runs (Milestone 10, updated post-Milestone-11) from{" "}
+        <code>cmd/simulator</code> (<code>boilerpulse-sim</code>) against a compiled
+        single-node and 3-node cluster on {RECORDED_AT} — not live, not estimated. See{" "}
         <span className="font-mono">docs/benchmarking.md</span> for full methodology,
-        including a real Raft replication bug this found and fixed, and a real
-        write-throughput ceiling it found and documented.
+        including a real Raft replication bug found and fixed, a write-throughput
+        ceiling found and fixed with group-commit batching, and the second, deeper
+        bottleneck that fix exposed — found, measured, and documented rather than
+        hidden.
       </p>
 
       <div className="mt-8 space-y-8">

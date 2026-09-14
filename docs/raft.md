@@ -68,6 +68,21 @@ never imports gRPC or protobuf.
   minority node away, committing an entry on the majority side, then
   reconnecting and confirming the once-isolated node converges rather than
   diverging.
+- **Group-committed proposals**: `Propose` doesn't append and persist its
+  own entry directly. It enqueues onto a channel (`apply.go`'s
+  `appendLoop`), and a single goroutine drains whatever else has piled up
+  (capped at `maxAppendBatchSize`, currently 64) and persists the whole
+  batch with one call to `Storage.AppendEntries` — one fsync on
+  `FileStorage`, covering however many proposals arrived together. This
+  fixed a real, measured write-throughput ceiling (see
+  `docs/benchmarking.md`) — but chasing that fix uncovered a second,
+  deeper bottleneck in the sequential *apply* path, documented there rather
+  than fixed here. `sendAppendEntriesTo` caps how many entries go in a
+  single `AppendEntries` RPC (`maxReplicationBatchSize`, also 64) for the
+  same reason: an uncapped send to a far-behind follower can itself exceed
+  `RPCTimeout`, and a timed-out send never advances `nextIndex`, so the
+  same now-larger backlog would just get retried forever instead of making
+  incremental progress.
 - **Overwritten-proposal detection**: `Propose` remembers the term it
   proposed an entry under; if that log index later holds a different term
   (a new leader overwrote it after a partition), `Propose` returns

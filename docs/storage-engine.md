@@ -3,16 +3,19 @@
 `internal/storage/lsm.Engine` is the durable `storage.Engine` implementation
 used by `cmd/node`. It's a small LSM-tree: a write-ahead log, an in-memory
 memtable, and immutable SSTable files on disk, with synchronous flush and
-compaction.
+compaction, and group-committed writes.
 
 ```
-Put/Delete
+Put/Delete (any number of concurrent callers)
     │
     ▼
- WAL.Append (fsync)  ──────────────────────────► wal.log
+ assign seq, enqueue (e.mu held only for this step)
     │
     ▼
- memtable[key] = entry
+ opLoop: drain whatever's queued, ONE WAL.AppendBatch (ONE fsync) for all of it
+    │                                                ──────────────► wal.log
+    ▼
+ apply every op to the memtable, in seq order (e.mu held for this step)
     │
     │  memtable size > threshold?
     ▼
@@ -67,6 +70,36 @@ A data block (sorted entries: key, tombstone flag, consistency, expires-at,
 version, value), followed by a full index (key → data-block offset), followed
 by a 28-byte footer (index offset, index length, entry count, magic number).
 `Open` loads the index into memory; a point lookup costs one seek + read.
+
+## Group commit (concurrent writes share one fsync)
+
+`Put`/`Delete` don't call the WAL directly. Each one briefly holds `e.mu`
+just long enough to assign a sequence number and enqueue its record and
+memtable mutation onto a channel (`internal/storage/lsm/engine.go`'s
+`opCh`) — that brief, fast, in-memory critical section is what guarantees
+enqueue order matches sequence order. A single background goroutine
+(`opLoop`) drains whatever has accumulated, writes every queued record with
+**one** trailing fsync (`wal.Writer.AppendBatch`), and only then applies
+every mutation to the memtable, still in that same order, under `e.mu`
+again.
+
+The payoff: N concurrent writers no longer mean N serialized fsyncs.
+`TestConcurrentPutsCoalesceIntoFewerWALBatches`
+(`internal/storage/lsm/groupcommit_test.go`) proves this directly — 50
+concurrent `Put`s collapse into a handful of `AppendBatch` calls, not 50.
+`TestConcurrentPutsToSameKeyApplyInSeqOrder` guards the correctness
+requirement this design introduces: two concurrent writers to the *same*
+key must still apply in sequence-assigned order, never the reverse (a
+lost update), even though they may land in the same batch or race to
+acquire `e.mu` again afterward.
+
+`internal/raft`'s `Node.Propose` uses the identical pattern
+(`appendLoop`/`appendBatch` in `apply.go`) for the Raft log itself — see
+`docs/raft.md` and `docs/benchmarking.md` for what that fixed (and what it
+didn't: the *apply* path, where committed entries reach this engine's
+`Put`, is still strictly sequential — see `docs/benchmarking.md`'s "What we
+found" for why that's a real, separate, currently-unsolved bottleneck
+under sustained heavy write load).
 
 ## Crash-safe flush protocol
 

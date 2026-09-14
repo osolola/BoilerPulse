@@ -2,7 +2,7 @@
 
 **A distributed key-value store, built from scratch — hand-rolled Raft consensus, a custom LSM storage engine, and a real gateway — stress-tested with a campus-events workload and chaos-engineered against itself.**
 
-The campus theme is the excuse; the distributed system is the point. Nothing here wraps etcd, Redis, or Postgres — the consensus algorithm, the on-disk storage format, and the write-ahead log are all implemented from the paper up, in Go, with 243 tests and a near 1:1 test-to-implementation-code ratio backing them.
+The campus theme is the excuse; the distributed system is the point. Nothing here wraps etcd, Redis, or Postgres — the consensus algorithm, the on-disk storage format, and the write-ahead log are all implemented from the paper up, in Go, with 246 tests and a near 1:1 test-to-implementation-code ratio backing them.
 
 ![Dashboard](docs/images/dashboard.png)
 
@@ -11,7 +11,7 @@ The campus theme is the excuse; the distributed system is the point. Nothing her
 Most portfolio projects are CRUD apps with a deploy button. This one is a real distributed systems implementation that was load-tested and chaos-tested hard enough to find genuine bugs in itself — and the fixes, the regression tests, and the honest writeups of what *wasn't* fixed are all still in the repo. A few examples:
 
 - **A real Raft concurrency bug, found by actually generating load.** Running the benchmark suite against a live cluster reliably destabilized a healthy leader — elections firing every second for no real reason. The cause: concurrent writes spawned one goroutine (and one `AppendEntries` RPC) *per peer per proposal*, with no serialization, flooding peers badly enough to starve the leader's own heartbeats. Fixed by serializing replication per peer through a coalescing trigger channel, with a deterministic regression test that fires 50 concurrent proposals at a blocked transport and asserts they collapse into ~1-5 real RPCs, not 50. See [`internal/raft/replication.go`](internal/raft/replication.go).
-- **A write-throughput ceiling, found and honestly documented instead of silently patched.** The same benchmark run showed the 3-node cluster degrading to a 38% error rate at ~80 sustained writes/sec, while the identical load against a single node stayed at 0% errors. Root cause: the WAL fsyncs on every write while holding the node's one mutex, so every concurrent proposal serializes through one lock and one disk barrier. The real fix (group-commit batching) is a bigger structural change — so instead of a rushed same-day patch, it's measured, explained, and left as documented future work. See [`docs/benchmarking.md`](docs/benchmarking.md).
+- **A write-throughput ceiling, fixed — which promptly uncovered a second one.** The 3-node cluster was degrading to a 38% error rate at ~80 sustained writes/sec because the WAL fsynced on every write while holding the node's one mutex, serializing every concurrent proposal through one lock and one disk barrier. Fixed with group-commit batching (concurrent writers share one fsync, proven by tests that count actual fsync calls, not just end-state correctness) — which fixed three of four affected benchmark scenarios outright and cut a live failover's p99 from 484ms to 29.5ms. The fourth (the most extreme, highest-write scenario) didn't improve: fixing the write path increased the commit rate enough to expose a second, previously-hidden bottleneck in the sequential state-machine apply path, caught live via a new Prometheus `apply_lag` metric. That one is measured, explained, and left as documented future work, the same honest way the first one was. See [`docs/benchmarking.md`](docs/benchmarking.md).
 - **A CORS bug that only a real browser could catch — twice.** `curl` doesn't enforce CORS, so two separate bugs shipped past extensive backend testing and were only caught by actually driving the frontend in a headless browser: missing `Access-Control-Allow-Origin` entirely, and later, a proxy layer that copied a node's CORS headers on top of the gateway's own, duplicating every `Access-Control-*` header and making browsers reject the response outright.
 - **Crash safety that's actually tested, not assumed.** Torn WAL writes, torn Raft-log writes, checksum corruption, crash-after-flush-before-reset — each has an explicit test that corrupts real bytes on disk and verifies recovery, not just a "should be fine" comment.
 
@@ -23,13 +23,13 @@ Full list of what was found and fixed, milestone by milestone, is in [`docs/road
 
 | Scenario | Topology | Achieved RPS | p99 latency | Errors |
 |---|---|---|---|---|
-| Finals week (sustained, moderate load) | 3-node | 51.6 | 27ms | 0% |
-| Home game (peak 150 rps) | 3-node | 119.9 | 36ms | 0.02% |
-| **Leader killed mid-run** | 3-node | 117.6 | 483ms | 0.19% |
-| Emergency alert (peak 200 rps, write-heavy) | 3-node | 145.2 | **541ms** | **38.1%** |
-| Emergency alert (same load) | single-node | 172.8 | 15ms | 0% |
+| Finals week (sustained, moderate load) | 3-node | 51.6 | 20.5ms | 0% |
+| Home game (peak 150 rps) | 3-node | 119.7 | 26.8ms | 0% |
+| **Leader killed mid-run** | 3-node | 118.9 | 29.5ms | 0.22% |
+| Emergency alert (peak 200 rps, write-heavy) | 3-node | 117.8 | **1423ms** | **36.2%** |
+| Emergency alert (same load) | single-node | 171.8 | 14.5ms | 0% |
 
-That last pair is the real cost of consensus made visible: identical load, clean on one node, a real capacity ceiling on three. Full methodology and five scenarios in [`docs/benchmarking.md`](docs/benchmarking.md), or see it rendered on the app's own `/simulation` page:
+That last pair is still the real cost of consensus made visible — but it's a different bottleneck than it used to be. A group-commit fix (batching concurrent writes into shared fsyncs, see below) fixed the original write-throughput ceiling well enough that the other four rows above all improved (the failover row's p99 dropped from 484ms to 29.5ms). Fixing it also increased the commit rate enough to expose a second, deeper bottleneck in the sequential apply path, which the emergency row still hits — found, measured, and documented, not swept under the rug. Full methodology in [`docs/benchmarking.md`](docs/benchmarking.md), or see it rendered on the app's own `/simulation` page:
 
 ![Benchmark results](docs/images/simulation-results.png)
 
@@ -137,7 +137,7 @@ make race   # race detector — everything is clean under it
 make lint   # gofmt + go vet
 ```
 
-243 test functions across the Go backend (~7,100 lines of test code against ~7,800 lines of implementation) plus frontend typecheck/lint — including explicit crash-recovery tests (torn WAL/Raft-log writes, checksum corruption), Raft algorithm tests against a fast in-memory fake network, real-gRPC-over-localhost tests, full multi-node cluster integration tests, and `tests/failure`'s four chaos scenarios against a real cluster. Several of the bugs described above were caught specifically *because* of this — a fake-network test wouldn't have reproduced the replication flood, and no amount of `curl` would have caught either CORS bug.
+246 test functions across the Go backend (~7,400 lines of test code against ~8,000 lines of implementation) plus frontend typecheck/lint — including explicit crash-recovery tests (torn WAL/Raft-log writes, checksum corruption), Raft algorithm tests against a fast in-memory fake network, real-gRPC-over-localhost tests, full multi-node cluster integration tests, and `tests/failure`'s four chaos scenarios against a real cluster. Several of the bugs described above were caught specifically *because* of this — a fake-network test wouldn't have reproduced the replication flood, and no amount of `curl` would have caught either CORS bug.
 
 ## Documentation
 

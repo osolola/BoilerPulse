@@ -69,11 +69,20 @@ type Node struct {
 	replicateCh   map[string]chan struct{}
 	replicationWG sync.WaitGroup
 
-	stopCh      chan struct{}
-	doneCh      chan struct{}
-	applyDoneCh chan struct{}
-	started     bool
-	stopOnce    sync.Once
+	// proposeCh is where Propose enqueues a pending append, and appendLoop
+	// (the sole writer of n.log for leader-initiated proposals) drains it.
+	// Buffered generously so a burst of concurrent Propose calls can pile
+	// up waiting to be picked up rather than each blocking on the enqueue
+	// itself -- see appendLoop's doc comment for why that's the whole
+	// point (group-committing their fsyncs together).
+	proposeCh chan *pendingPropose
+
+	stopCh       chan struct{}
+	doneCh       chan struct{}
+	applyDoneCh  chan struct{}
+	appendDoneCh chan struct{}
+	started      bool
+	stopOnce     sync.Once
 }
 
 // NewNode constructs a Node, recovering currentTerm/votedFor/log from
@@ -113,6 +122,7 @@ func NewNode(id string, peers []string, storage Storage, transport Transport, sm
 	for _, p := range peers {
 		replicateCh[p] = make(chan struct{}, 1)
 	}
+	const proposeChBuffer = 1024
 
 	return &Node{
 		id:           id,
@@ -132,9 +142,11 @@ func NewNode(id string, peers []string, storage Storage, transport Transport, sm
 		state:        Follower,
 		applyNotify:  make(chan struct{}, 1),
 		replicateCh:  replicateCh,
+		proposeCh:    make(chan *pendingPropose, proposeChBuffer),
 		stopCh:       make(chan struct{}),
 		doneCh:       make(chan struct{}),
 		applyDoneCh:  make(chan struct{}),
+		appendDoneCh: make(chan struct{}),
 	}, nil
 }
 
@@ -152,6 +164,7 @@ func (n *Node) Start() {
 
 	go n.run()
 	go n.applyLoop()
+	go n.appendLoop()
 	for _, p := range n.peers {
 		n.replicationWG.Add(1)
 		go n.replicationLoop(p)
@@ -171,6 +184,7 @@ func (n *Node) Stop() {
 		if started {
 			<-n.doneCh
 			<-n.applyDoneCh
+			<-n.appendDoneCh
 			n.replicationWG.Wait()
 		}
 	})

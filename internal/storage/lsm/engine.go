@@ -30,14 +30,48 @@ type sstableEntry struct {
 	table *sstable.Table
 }
 
+// walWriter is the subset of *wal.Writer's API Engine depends on --
+// exists so tests can substitute a fake that counts AppendBatch calls,
+// proving concurrent writes actually get batched into fewer fsyncs rather
+// than just asserting on end-state correctness.
+type walWriter interface {
+	AppendBatch(records []wal.Record) error
+	Reset() error
+	Close() error
+}
+
+var _ walWriter = (*wal.Writer)(nil)
+
+// engineOp is one Put or Delete queued for opLoop's group commit: the
+// already-built WAL record (seq assigned, so its position in the log is
+// fixed the moment it's enqueued), the memtable mutation to apply once that
+// record is durable, and where to send the result.
+type engineOp struct {
+	rec      wal.Record
+	apply    func() // mutates the memtable; called only after this op's batch is durably fsynced, and only while holding e.mu
+	resultCh chan error
+}
+
 // Engine is a WAL + memtable + SSTable storage.Engine implementation.
 //
-// Flush and compaction both run synchronously, inline with the write that
-// triggers them, while holding the engine's write lock. That trades a
-// latency spike on the triggering write for a much simpler correctness
+// Writes are group-committed: Put/Delete assign a sequence number and
+// enqueue their WAL record and memtable mutation to opCh while briefly
+// holding e.mu (just long enough to make enqueue order match seq order),
+// then release the lock and wait for the result. A single background
+// goroutine (opLoop) drains whatever has accumulated on opCh, writes every
+// queued record with ONE trailing fsync (wal.Writer.AppendBatch), and only
+// then applies every mutation to the memtable in the same order, under
+// e.mu. This is what lets concurrent writers actually share a single
+// fsync instead of each paying for their own, serialized one at a time --
+// see docs/storage-engine.md and docs/benchmarking.md for the write-
+// throughput ceiling this closes.
+//
+// Flush and compaction still run synchronously, inline with whichever
+// opLoop batch crosses the flush threshold, while holding e.mu. That
+// trades a latency spike on that batch for a much simpler correctness
 // story than a background-flush design (which needs an immutable, still-
-// readable "frozen" memtable while a new one accepts writes) would require.
-// This is a deliberate simplification for this milestone — see
+// readable "frozen" memtable while a new one accepts writes) would
+// require. Deliberate simplification for this milestone — see
 // docs/storage-engine.md.
 type Engine struct {
 	mu sync.RWMutex
@@ -46,7 +80,7 @@ type Engine struct {
 	logger  *slog.Logger
 	opts    Options
 
-	wal          *wal.Writer
+	wal          walWriter
 	memtable     map[string]storage.Entry
 	memtableSize int
 
@@ -54,6 +88,11 @@ type Engine struct {
 	sstableSeq int
 
 	nextSeq uint64
+
+	opCh     chan engineOp
+	stopCh   chan struct{}
+	opDoneCh chan struct{}
+	stopOnce sync.Once
 }
 
 // Open recovers engine state from dataDir (existing SSTables, then WAL
@@ -97,7 +136,7 @@ func Open(dataDir string, logger *slog.Logger, opts Options) (*Engine, error) {
 		"wal_records_replayed", len(records),
 		"next_seq", maxVersion+1)
 
-	return &Engine{
+	e := &Engine{
 		dataDir:      dataDir,
 		logger:       logger,
 		opts:         opts,
@@ -107,7 +146,18 @@ func Open(dataDir string, logger *slog.Logger, opts Options) (*Engine, error) {
 		sstables:     sstables,
 		sstableSeq:   seq,
 		nextSeq:      maxVersion + 1,
-	}, nil
+		// Buffered generously: this is what lets a burst of concurrent
+		// Put/Delete calls actually pile up for opLoop to batch, rather
+		// than each blocking on the enqueue itself (which would just
+		// reintroduce the same one-at-a-time serialization this exists to
+		// avoid). A full buffer still just makes a caller wait to enqueue
+		// -- never incorrect, only less effective at batching.
+		opCh:     make(chan engineOp, 1024),
+		stopCh:   make(chan struct{}),
+		opDoneCh: make(chan struct{}),
+	}
+	go e.opLoop()
+	return e, nil
 }
 
 func (e *Engine) Get(key string) (storage.Entry, error) {
@@ -117,12 +167,6 @@ func (e *Engine) Get(key string) (storage.Entry, error) {
 }
 
 func (e *Engine) Put(key string, value []byte, consistency storage.Consistency, ttl time.Duration) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	seq := e.nextSeq
-	e.nextSeq++
-
 	now := time.Now()
 	var expiresAt time.Time
 	var expiresAtNano int64
@@ -130,58 +174,118 @@ func (e *Engine) Put(key string, value []byte, consistency storage.Consistency, 
 		expiresAt = now.Add(ttl)
 		expiresAtNano = expiresAt.UnixNano()
 	}
-
 	stored := make([]byte, len(value))
 	copy(stored, value)
 
-	rec := wal.Record{
-		Seq:               seq,
-		Op:                wal.OpSet,
-		Timestamp:         now.UnixNano(),
-		ExpiresAtUnixNano: expiresAtNano,
-		Key:               key,
-		Consistency:       string(consistency),
-		Value:             stored,
+	e.mu.Lock()
+	seq := e.nextSeq
+	e.nextSeq++
+	entry := storage.Entry{Value: stored, Consistency: consistency, ExpiresAt: expiresAt, Version: seq}
+	op := engineOp{
+		rec: wal.Record{
+			Seq: seq, Op: wal.OpSet, Timestamp: now.UnixNano(), ExpiresAtUnixNano: expiresAtNano,
+			Key: key, Consistency: string(consistency), Value: stored,
+		},
+		apply:    func() { e.applyToMemtable(key, entry) },
+		resultCh: make(chan error, 1),
 	}
-	if err := e.wal.Append(rec); err != nil {
+	e.opCh <- op // enqueue while still holding e.mu, so enqueue order == seq order
+	e.mu.Unlock()
+
+	if err := <-op.resultCh; err != nil {
 		return fmt.Errorf("appending to WAL: %w", err)
 	}
-
-	e.applyToMemtable(key, storage.Entry{
-		Value:       stored,
-		Consistency: consistency,
-		ExpiresAt:   expiresAt,
-		Version:     seq,
-	})
-
-	return e.maybeFlushLocked()
+	return nil
 }
 
 func (e *Engine) Delete(key string) error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	if _, err := e.lookupLocked(key); err != nil {
+		e.mu.Unlock()
 		return err
 	}
 
 	seq := e.nextSeq
 	e.nextSeq++
+	op := engineOp{
+		rec:      wal.Record{Seq: seq, Op: wal.OpDelete, Timestamp: time.Now().UnixNano(), Key: key},
+		apply:    func() { e.applyToMemtable(key, storage.Entry{Tombstone: true, Version: seq}) },
+		resultCh: make(chan error, 1),
+	}
+	e.opCh <- op
+	e.mu.Unlock()
 
-	rec := wal.Record{Seq: seq, Op: wal.OpDelete, Timestamp: time.Now().UnixNano(), Key: key}
-	if err := e.wal.Append(rec); err != nil {
+	if err := <-op.resultCh; err != nil {
 		return fmt.Errorf("appending to WAL: %w", err)
 	}
-
-	e.applyToMemtable(key, storage.Entry{Tombstone: true, Version: seq})
-
-	return e.maybeFlushLocked()
+	return nil
 }
 
-// Close performs an orderly shutdown: closes the WAL and all open SSTable
-// file handles. It does not flush the memtable — durability already comes
-// from per-write WAL fsyncs, not from a flush-on-close.
+// opLoop is the sole writer to the WAL file and the sole applier of
+// memtable mutations from Put/Delete (HandleAppendEntries-style callers,
+// i.e. every write goes through here) — started by Open, stopped by
+// Close/CloseWALOnly. Processing one batch at a time on a single goroutine
+// is what guarantees records land in the WAL, and mutations land in the
+// memtable, in exactly seq order even though the ops within one batch were
+// enqueued by different concurrent callers.
+func (e *Engine) opLoop() {
+	defer close(e.opDoneCh)
+	for {
+		select {
+		case <-e.stopCh:
+			return
+		case first := <-e.opCh:
+			batch := []engineOp{first}
+		drain:
+			for {
+				select {
+				case op := <-e.opCh:
+					batch = append(batch, op)
+				default:
+					break drain
+				}
+			}
+			e.processBatch(batch)
+		}
+	}
+}
+
+// processBatch writes every op's WAL record with a single trailing fsync,
+// then (only if that succeeded) applies every op's memtable mutation in
+// order and checks once whether the batch pushed the memtable past the
+// flush threshold.
+func (e *Engine) processBatch(batch []engineOp) {
+	records := make([]wal.Record, len(batch))
+	for i, op := range batch {
+		records[i] = op.rec
+	}
+
+	if err := e.wal.AppendBatch(records); err != nil {
+		for _, op := range batch {
+			op.resultCh <- err
+		}
+		return
+	}
+
+	e.mu.Lock()
+	for _, op := range batch {
+		op.apply()
+	}
+	flushErr := e.maybeFlushLocked()
+	e.mu.Unlock()
+
+	for _, op := range batch {
+		op.resultCh <- flushErr
+	}
+}
+
+// Close performs an orderly shutdown: stops opLoop, closes the WAL, and
+// closes all open SSTable file handles. It does not flush the memtable —
+// durability already comes from per-batch WAL fsyncs, not from a
+// flush-on-close.
 func (e *Engine) Close() error {
+	e.stop()
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -202,9 +306,20 @@ func (e *Engine) Close() error {
 // can simulate an unclean shutdown — a real crash wouldn't get a chance to
 // flush or close SSTables cleanly either. Prefer Close for a real shutdown.
 func (e *Engine) CloseWALOnly() error {
+	e.stop()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.wal.Close()
+}
+
+// stop halts opLoop and waits for it to exit, so neither Close variant
+// closes the WAL file out from under a batch that's still being written.
+// Safe to call more than once.
+func (e *Engine) stop() {
+	e.stopOnce.Do(func() {
+		close(e.stopCh)
+		<-e.opDoneCh
+	})
 }
 
 func (e *Engine) lookupLocked(key string) (storage.Entry, error) {

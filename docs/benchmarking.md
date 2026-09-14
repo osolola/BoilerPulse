@@ -7,11 +7,14 @@ from actually running it against a real compiled cluster on this machine —
 nothing here is estimated, extrapolated, or invented. Raw JSON reports are
 in `benchmarks/results/`.
 
-Running this uncovered two real things about the system that unit tests
-never would have: a genuine concurrency bug in the Raft replication path
-(found and **fixed**, with a regression test), and a real write-throughput
-ceiling from the WAL's per-write fsync (found and **documented**, not
-fixed — see below for why).
+Running this uncovered real things about the system unit tests never
+would have: a genuine concurrency bug in the Raft replication path (found
+and **fixed**, with a regression test), a write-throughput ceiling from
+the WAL's per-write fsync (found, then **fixed** via group-commit
+batching — see below), and, once that fix increased the commit rate
+enough to expose it, a second, deeper bottleneck in the sequential
+state-machine apply path (found and **documented**, not yet fixed — same
+section).
 
 ## Methodology
 
@@ -51,19 +54,34 @@ All numbers are p50/p95/p99/max latency in milliseconds, achieved
 requests/sec, and error rate, from the actual JSON reports in
 `benchmarks/results/`.
 
+**Current numbers** (after the group-commit work below; raw JSON in
+`benchmarks/results/`):
+
 | Scenario | Topology | Requests | Achieved RPS | p50 | p95 | p99 | Max | Errors |
 |---|---|---|---|---|---|---|---|---|
-| normal | single-node | 199 | 9.9 | 1.6 | 6.8 | 8.2 | 8.3 | 0% |
-| normal | 3-node | 199 | 9.9 | 2.0 | 18.1 | 19.2 | 19.8 | 0% |
-| finals | single-node | 1549 | 51.6 | 1.1 | 6.1 | 6.8 | 40.6 | 0% |
-| finals | 3-node | 1548 | 51.6 | 1.4 | 17.4 | 27.1 | 445.8 | 0% |
-| athletics | single-node | 4193 | 119.8 | 1.3 | 6.5 | 10.0 | 36.1 | 0% |
-| athletics | 3-node | 4197 | 119.9 | 1.3 | 17.1 | 36.0 | 774.6 | 0.02% |
-| **emergency** | single-node | 3629 | 172.8 | 4.6 | 11.5 | 14.6 | 21.4 | **0%** |
-| **emergency** | 3-node | 3593 | 145.2 | 1.5 | 14.6 | **540.9** | **1554.4** | **38.1%** |
-| hotkey | single-node | 599 | 29.9 | 1.3 | 5.5 | 7.3 | 10.1 | 0% |
-| hotkey | 3-node | 413 | 20.6 | 1.1 | 16.0 | 18.5 | 28.8 | 0% |
-| athletics + kill leader at t=15s | 3-node | 4118 | 117.6 | 1.2 | 19.2 | **483.6** | 848.9 | **0.19%** |
+| normal | single-node | 199 | 9.9 | 0.7 | 6.2 | 8.0 | 9.0 | 0% |
+| normal | 3-node | 199 | 9.9 | 1.5 | 17.1 | 20.1 | 112.6 | 0% |
+| finals | single-node | 1547 | 51.6 | 0.7 | 6.0 | 13.0 | 142.6 | 0% |
+| finals | 3-node | 1549 | 51.6 | 1.2 | 16.5 | 20.5 | 35.2 | 0% |
+| athletics | single-node | 4167 | 119.1 | 0.9 | 5.9 | 13.7 | 286.6 | 0% |
+| athletics | 3-node | 4189 | 119.7 | 0.8 | 16.2 | 26.8 | 50.0 | 0% |
+| **emergency** | single-node | 3609 | 171.8 | 1.1 | 9.6 | 14.5 | 135.4 | **0%** |
+| **emergency** | 3-node | 3629 | 117.8 | 1.2 | 290.4 | **1423.0** | **1955.2** | **36.2%** |
+| hotkey | single-node | 598 | 29.9 | 1.1 | 5.1 | 6.9 | 9.7 | 0% |
+| hotkey | 3-node | 599 | 29.9 | 1.0 | 15.6 | 18.6 | 26.4 | 0% |
+| athletics + kill leader at t=15s | 3-node | 4163 | 118.9 | 1.0 | 16.4 | **29.5** | 145.1 | **0.22%** |
+
+**Before the group-commit work** (the numbers Milestone 10 originally
+shipped with, for comparison — the "What we found" section below explains
+exactly what changed and why the last row didn't):
+
+| Scenario | Topology | p99 | Max | Errors |
+|---|---|---|---|---|
+| finals | 3-node | 27.1 | 445.8 | 0% |
+| athletics | 3-node | 36.0 | 774.6 | 0.02% |
+| **emergency** | 3-node | **540.9** | **1554.4** | **38.1%** |
+| hotkey | 3-node | 18.5 | 28.8 | 0% |
+| athletics + kill leader at t=15s | 3-node | **483.6** | 848.9 | **0.19%** |
 
 ## What we found
 
@@ -116,62 +134,101 @@ cluster within seconds no longer does — confirmed by re-running the exact
 same concurrent-PUT stress test manually against a rebuilt cluster and
 watching the term hold steady.
 
-### 2. A real capacity ceiling: WAL fsync is fully serialized (documented, not fixed)
+### 2. The WAL fsync ceiling — fixed at the propose layer, which uncovered a second, deeper bottleneck
 
-The `emergency` scenario (peak 200 rps, 40% write ratio — roughly 80
-writes/sec sustained) shows a 38% error rate and a p99 latency of 540ms on
-the 3-node cluster, against a **clean 0% error rate at the identical
-target curve on single-node**. That gap is the real, measured cost of
-consensus under this implementation's current design, not noise — and the
-`athletics` scenario (also 120 rps peak, but only 10% writes ≈ 12
-writes/sec) stays clean on 3-node, which points at write rate specifically,
-not overall RPS, as the limiting factor.
+The original finding here (Milestone 10) was that `FileStorage.AppendEntries`
+fsyncs on every call, invoked from `Node.Propose` while holding the node's
+one mutex — so every concurrent proposal serialized through one lock *and*
+one fsync, one at a time. That's now fixed: `Propose` enqueues onto a
+channel (`apply.go`'s `appendLoop`), and a single goroutine drains
+whatever has piled up and appends the whole batch with **one** fsync
+(`internal/raft/apply.go`, `internal/storage/lsm/engine.go`'s analogous
+`opLoop` for direct single-node writes, `internal/storage/wal/writer.go`'s
+new `AppendBatch`). `TestConcurrentProposalsCoalesceIntoFewerAppendCalls`
+and `TestConcurrentPutsCoalesceIntoFewerWALBatches` prove this directly —
+50 concurrent writers collapse into single-digit fsyncs, not 50.
 
-The cause: `internal/raft/filestorage.go`'s `FileStorage.AppendEntries`
-calls `fsync` on every single call, and it's invoked from
-`internal/raft/log.go`'s `appendLogLocked` while `Node.Propose` holds the
-node's one mutex (`n.mu`) — correct for durability (an entry is only
-acknowledged after it's actually on disk), but it means every concurrent
-proposal serializes through one lock *and* one fsync, one at a time. Under
-sustained high write concurrency, proposals queue up behind each other;
-some exceed the client's timeout before they can even be appended, and the
-same lock contention can delay the tick loop's heartbeat *detection* (not
-just sending), occasionally triggering the same kind of election churn
-described above as a secondary effect — this is why `emergency`'s max
-latency (1554ms) is so much higher than its p99 (541ms): a handful of
-requests were genuinely stuck behind both the write queue and a stalled
-heartbeat.
+The fix genuinely worked for every scenario except one: `finals`,
+`athletics`, and `hotkey` all hold at 0% errors with **better** tail
+latency than before (`athletics`'s p99 dropped from 36.0ms to 26.8ms, its
+max from 774.6ms to 50.0ms), and the failover scenario's p99 dropped from
+484ms to **29.5ms** — a new leader can now catch up a backlog of pending
+proposals in one batch instead of replaying them one fsync at a time.
 
-This is **not fixed** in this milestone. The standard production fix is
-group-commit / batched fsync (accumulate multiple pending proposals and
-`fsync` them together in one disk operation), which would meaningfully
-change `Propose`'s and `appendLogLocked`'s structure and deserves its own
-focused pass with dedicated tests, not a rushed change alongside a
-benchmarking milestone. Documenting a real, measured limit honestly is
-more useful than a same-day fix that isn't well-tested — consistent with
-how `docs/raft.md` and `docs/storage-engine.md` already document
-no-snapshotting and full-table compaction as known simplifications rather
-than silently working around them.
+**`emergency` did not improve — it's still ~36% errors, and its p99
+actually got worse (541ms → 1423ms).** Chasing why exposed a real, deeper
+bottleneck the propose-side fix could never have touched:
 
-**Practical takeaway**: this cluster, as built, comfortably sustains
-blended read/write traffic up to roughly 150 rps with a modest (≤15%)
-write ratio, and degrades under sustained write-heavy bursts much above
-roughly 50-80 writes/sec. That's a real, useful number for anyone deciding
-whether this is production-ready (it isn't, and the roadmap doesn't claim
-otherwise) versus a solid consensus-and-storage implementation with a
-well-understood, well-documented next bottleneck.
+`internal/metrics`'s `boilerpulse_raft_apply_lag` gauge (Milestone
+post-11's Day 1) made this directly observable. Polling it live during an
+`emergency` run:
+
+```
+t=1s  commit_index=5034  apply_lag=18
+t=9s  commit_index=5530  apply_lag=12
+t=10s commit_index=5619  apply_lag=104
+t=15s commit_index=6180  apply_lag=514
+t=20s commit_index=6701  apply_lag=876
+t=30s commit_index=7840  apply_lag=1393
+```
+
+The Raft log itself is no longer the bottleneck — `commit_index` climbs at
+a healthy, steady ~100/sec throughout, proving the propose-side fix is
+doing its job. But `lastApplied` falls further behind every second,
+unboundedly. The reason: `internal/raft/apply.go`'s `applyPending` applies
+committed entries to the state machine **strictly one at a time** — it
+calls `stateMachine.Apply` (which calls `engine.Put`, which goes through
+the very `opLoop` group-commit machinery built for this milestone) and
+waits for that call to fully return before even considering the next
+entry. There is structurally never more than one `Put` in flight from this
+path, so `opLoop` never sees more than a batch of one — **the apply path
+gets zero benefit from group commit, no matter how well-batched the
+propose path is.** Speeding up commits without speeding up applies just
+moves the queue from one end of the pipeline to the other: `Propose`
+blocks in `waitForApply` until `lastApplied` reaches its index, so a
+growing apply lag shows up to a client as growing latency, and past ~5s
+(the load generator's client timeout), as an outright error — which is
+exactly the error and p99 numbers above.
+
+This is **found and documented, not fixed**, same as the original finding
+one layer up. A real fix means batching the *apply* path too — the leader
+already knows exactly how many entries are ready to apply at once
+(`commitIndex - lastApplied`), so `applyPending` could hand a whole batch
+to the state machine at once instead of one command at a time. Doing that
+safely needs a real design decision this milestone didn't have time for:
+whether `StateMachine` gains a proper `ApplyBatch` method (a real interface
+change, needing the same care Day 2's `Snapshot`/`Restore` addition got),
+or whether entries get parallelized some other way that doesn't risk
+applying two updates to the same key out of order — the exact race
+`TestConcurrentPutsToSameKeyApplyInSeqOrder` (`internal/storage/lsm`) exists
+to guard against for the *propose* side, and would need an equivalent
+guarantee on the *apply* side before this can be done safely. Documenting
+a real, measured limit — and exactly why the obvious next fix isn't a
+same-day change — is more useful than pretending the story ends here.
+
+**Practical takeaway**: this cluster now comfortably sustains everything
+tested up to and including a 150 rps blended load, and a real leader
+failure during load now costs single-digit milliseconds of p99 instead of
+hundreds. Only the most extreme sustained write-heavy scenario (`emergency`,
+~80 writes/sec peak, 90% concentrated on one key) still saturates — for a
+different, now-precisely-identified reason than originally diagnosed. Any
+future work on this should start from `boilerpulse_raft_apply_lag`, not
+from re-deriving the diagnosis from scratch.
 
 ### 3. The real cost of a failover
 
 The `athletics + kill leader` run isolates what a live failover actually
-costs, on top of an otherwise-clean scenario: 8 failed requests out of
-4118 (0.19%), concentrated in the few hundred milliseconds between the
-leader dying and a new one being elected and detected — p99 latency during
-that run (483ms) is roughly Raft's `MinElectionTimeout`-to-`MaxElectionTimeout`
-window (300-600ms, `raft.DefaultOptions`), which is exactly what you'd
-expect: the gateway's one-refresh-and-retry (`docs/gateway.md`) absorbs
-most requests transparently, and only the unlucky handful whose retry
-lands before the new leader is actually up see a real error.
+costs, on top of an otherwise-clean scenario: 9 failed requests out of
+4163 (0.22%), concentrated in the window between the leader dying and a
+new one being elected and detected — the gateway's one-refresh-and-retry
+(`docs/gateway.md`) absorbs most requests transparently, and only the
+unlucky handful whose retry lands before the new leader is actually up see
+a real error. p99 latency during that run dropped from 484ms (before the
+group-commit fix above) to **29.5ms** — a new leader now catches up
+whatever backlog of pending proposals accumulated during the election in
+one batched append instead of replaying it one fsync at a time, which
+turns out to matter more for failover recovery time than for steady-state
+throughput.
 
 ## Trying it yourself
 
@@ -191,6 +248,11 @@ BOILERPULSE_GATEWAY_CONFIG=configs/cluster/gateway-benchmark.yaml \
 
 make stop
 ```
+
+Watch `boilerpulse_raft_apply_lag` (`docs/observability.md`) on the leader
+while a scenario runs to see the apply-path bottleneck described above
+directly: `watch -n1 'curl -s localhost:8081/metrics | grep raft_apply_lag'`
+(adjust the port to whichever node is leader).
 
 See `simulator/scenario.go` for the exact scenario definitions,
 `docs/raft.md` for the consensus design being measured, and

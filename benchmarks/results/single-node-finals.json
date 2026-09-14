@@ -1,18 +1,18 @@
 {
   "scenario": "finals",
   "topology": "single-node",
-  "started_at": "2026-08-12T14:27:25.979764Z",
-  "duration_ms": 30000,
-  "total_requests": 1549,
+  "started_at": "2026-09-14T02:11:57.074577Z",
+  "duration_ms": 30001,
+  "total_requests": 1547,
   "error_count": 0,
   "error_rate": 0,
-  "achieved_rps": 51.63180861848786,
-  "latency_p50_ms": 1.076,
-  "latency_p95_ms": 6.093,
-  "latency_p99_ms": 6.8,
-  "latency_max_ms": 40.633,
+  "achieved_rps": 51.56478211826163,
+  "latency_p50_ms": 0.747,
+  "latency_p95_ms": 6.033,
+  "latency_p99_ms": 13.033,
+  "latency_max_ms": 142.569,
   "status_counts": {
-    "200": 1324,
+    "200": 1322,
     "204": 225
   }
 }

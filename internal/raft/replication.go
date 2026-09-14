@@ -115,6 +115,10 @@ func (n *Node) triggerReplication(peer string) {
 	}
 }
 
+// maxReplicationBatchSize caps how many entries one AppendEntries RPC
+// carries -- see its use in sendAppendEntriesTo.
+const maxReplicationBatchSize = 64
+
 // sendAppendEntriesTo replicates (or heartbeats) to one peer. It must not
 // be called while holding n.mu, and must only be called from peer's own
 // replicationLoop goroutine (never concurrently for the same peer).
@@ -145,7 +149,21 @@ func (n *Node) sendAppendEntriesTo(peer string) {
 
 	var entries []LogEntry
 	if nextIdx <= n.lastLogIndexLocked() {
-		entries = append(entries, n.log[nextIdx-n.logBaseIndex-1:]...) // copied out while still locked
+		tail := n.log[nextIdx-n.logBaseIndex-1:]
+		if len(tail) > maxReplicationBatchSize {
+			// A follower that's fallen far behind (e.g. it was just
+			// disconnected, or the leader's own group-commit just
+			// coalesced a large burst of proposals into one jump in the
+			// log) gets caught up incrementally, not in a single RPC big
+			// enough to risk blowing past RPCTimeout -- a timed-out send
+			// never advances nextIndex, so an uncapped send here just
+			// retries the same (by then even larger) backlog forever
+			// instead of making any progress. A real, measured regression
+			// an earlier version of this batching work introduced --
+			// see docs/benchmarking.md.
+			tail = tail[:maxReplicationBatchSize]
+		}
+		entries = append(entries, tail...) // copied out while still locked
 	}
 	leaderCommit := n.commitIndex
 	n.mu.Unlock()

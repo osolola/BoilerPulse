@@ -1,18 +1,18 @@
 {
   "scenario": "athletics",
   "topology": "single-node",
-  "started_at": "2026-08-12T14:27:58.623253Z",
+  "started_at": "2026-09-14T02:12:27.328631Z",
   "duration_ms": 35001,
-  "total_requests": 4193,
+  "total_requests": 4167,
   "error_count": 0,
   "error_rate": 0,
-  "achieved_rps": 119.79463918989624,
-  "latency_p50_ms": 1.297,
-  "latency_p95_ms": 6.519,
-  "latency_p99_ms": 10.03,
-  "latency_max_ms": 36.097,
+  "achieved_rps": 119.05262849372,
+  "latency_p50_ms": 0.909,
+  "latency_p95_ms": 5.893,
+  "latency_p99_ms": 13.684,
+  "latency_max_ms": 286.644,
   "status_counts": {
-    "200": 3741,
-    "204": 452
+    "200": 3774,
+    "204": 393
   }
 }
