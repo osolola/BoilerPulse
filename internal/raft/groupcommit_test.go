@@ -58,14 +58,17 @@ func TestConcurrentProposalsCoalesceIntoFewerAppendCalls(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			// waitForApply will time out (nothing ever advances
 			// commitIndex with zero peers and a leader that never
 			// heartbeats itself) -- this test only cares about the
 			// append/persist phase, not full commitment, so a context
 			// deadline here is an expected, harmless way for Propose to
-			// return once its entry is safely appended.
+			// return once its entry is safely appended. The deadline is
+			// generous (matching TestConcurrentProposalsCoalesceReplicationPerPeer
+			// in replication_test.go) so it can never itself race with the
+			// enqueue window below on a slow/contended CI runner.
 			_ = n.Propose(ctx, []byte("entry"))
 		}()
 	}
@@ -73,7 +76,16 @@ func TestConcurrentProposalsCoalesceIntoFewerAppendCalls(t *testing.T) {
 	waitFor(t, time.Second, "all proposals to be in flight", func() bool {
 		return storage.callCount.Load() >= 1
 	})
-	time.Sleep(50 * time.Millisecond) // let stragglers pile up on proposeCh behind the first in-flight call
+	// Let stragglers pile up on proposeCh behind the first in-flight call.
+	// 200ms (not the 50ms this originally shipped with) matches the margin
+	// TestConcurrentProposalsCoalesceReplicationPerPeer already relies on
+	// for the same class of goroutine-fan-out race -- 50ms was demonstrably
+	// not enough on a loaded CI runner, where scheduling 50 goroutines can
+	// itself take longer than that (a real flaky-test bug, not a product
+	// bug: it failed by UNDER-batching, i.e. by not exercising the
+	// coalescing path enough, never by asserting something false about
+	// correctness).
+	time.Sleep(200 * time.Millisecond)
 
 	close(storage.release)
 	wg.Wait()
